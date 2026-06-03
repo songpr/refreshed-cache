@@ -7,6 +7,13 @@ function nowMsFrom00_00() {
     return now.getHours() * 3600000 + now.getMinutes() * 60000 + now.getSeconds() * 1000 + now.getMilliseconds();
 }
 
+function getBackoffDelay(failureCount, initialDelayMs, maxDelayMs) {
+    const baseDelay = initialDelayMs * Math.pow(2, failureCount - 1);
+    const tempDelay = Math.min(maxDelayMs, baseDelay);
+    const jitter = Math.random() * Math.min(1000, tempDelay * 0.2);
+    return tempDelay + jitter;
+}
+
 /**
  * Data cache that do not have set method, fetch cached via fetch function 
  */
@@ -35,6 +42,40 @@ class DataCache {
         Object.defineProperty(this, "_fetch", { value: fetch, configurable: false, enumerable: false, writable: false });
         const _isAsyncFetch = util.types.isAsyncFunction(fetch);
         Object.defineProperty(this, "_isAsyncFetch", { get: () => _isAsyncFetch, configurable: false, enumerable: false });
+
+        const onRefresh = options.onRefresh;
+        if (onRefresh !== undefined && typeof onRefresh !== "function") throw new Error("Invalid onRefresh");
+        Object.defineProperty(this, "_onRefresh", { value: onRefresh, configurable: false, enumerable: false, writable: false });
+
+        const onError = options.onError;
+        if (onError !== undefined && typeof onError !== "function") throw new Error("Invalid onError");
+        Object.defineProperty(this, "_onError", { value: onError, configurable: false, enumerable: false, writable: false });
+
+        const checkValidity = options.checkValidity;
+        if (checkValidity !== undefined && typeof checkValidity !== "function") throw new Error("Invalid checkValidity");
+        Object.defineProperty(this, "_checkValidity", { value: checkValidity, configurable: false, enumerable: false, writable: false });
+
+        const isEqual = options.isEqual || ((a, b) => a === b);
+        if (typeof isEqual !== "function") throw new Error("Invalid isEqual");
+        Object.defineProperty(this, "_isEqual", { value: isEqual, configurable: false, enumerable: false, writable: false });
+
+        const backoffInitialDelay = options.backoffInitialDelay === undefined ? 1 : options.backoffInitialDelay;
+        if (!Number.isInteger(backoffInitialDelay) || backoffInitialDelay < 0) throw new Error("Invalid backoffInitialDelay");
+        Object.defineProperty(this, "_backoffInitialDelay", { value: backoffInitialDelay, configurable: false, enumerable: false, writable: false });
+
+        const backoffMaxDelay = options.backoffMaxDelay === undefined ? 60 : options.backoffMaxDelay;
+        if (!Number.isInteger(backoffMaxDelay) || backoffMaxDelay < 0) throw new Error("Invalid backoffMaxDelay");
+        Object.defineProperty(this, "_backoffMaxDelay", { value: backoffMaxDelay, configurable: false, enumerable: false, writable: false });
+
+        Object.defineProperty(this, "_hits", { value: 0, writable: true, configurable: false, enumerable: false });
+        Object.defineProperty(this, "_misses", { value: 0, writable: true, configurable: false, enumerable: false });
+        Object.defineProperty(this, "_refreshes", { value: 0, writable: true, configurable: false, enumerable: false });
+        Object.defineProperty(this, "_coalescedFetches", { value: 0, writable: true, configurable: false, enumerable: false });
+        Object.defineProperty(this, "_mismatches", { value: 0, writable: true, configurable: false, enumerable: false });
+        Object.defineProperty(this, "_invalidations", { value: 0, writable: true, configurable: false, enumerable: false });
+        Object.defineProperty(this, "_failureCount", { value: 0, writable: true, configurable: false, enumerable: false });
+
+
         const maxAge = options.maxAge === undefined ? 600 : options.maxAge;
         if (!Number.isInteger(maxAge) || maxAge < 0) throw new Error("Invalid maxAge");
         const refreshAge = options.refreshAge === undefined ? maxAge : options.refreshAge;
@@ -81,17 +122,32 @@ class DataCache {
                         if (dataCache.isClose === true) {
                             return;
                         }
+                        dataCache._failureCount = 0;
                         //cache is not close then set timeout loop again
-                        dataCache._timeoutLoop(asyncRefresh, time);
+                        dataCache._timeoutLoop(asyncRefresh, dataCache.refreshAge * 1000);
                     }).catch(err => {
                         try {
                             if (dataCache.isClose === true) {
                                 return;
                             }
-                            console.error("error when refrech cache")
-                            console.error(err.stack)
+                            dataCache._failureCount++;
+                            if (dataCache._onError) {
+                                dataCache._onError(err);
+                            } else {
+                                console.error("error when refrech cache")
+                                console.error(err.stack)
+                            }
+                            
+                            let nextDelay = time;
+                            if (dataCache._backoffInitialDelay > 0) {
+                                nextDelay = getBackoffDelay(
+                                    dataCache._failureCount,
+                                    dataCache._backoffInitialDelay * 1000,
+                                    dataCache._backoffMaxDelay * 1000
+                                );
+                            }
                             //cache is not close then set timeout loop again
-                            dataCache._timeoutLoop(asyncRefresh, time);
+                            dataCache._timeoutLoop(asyncRefresh, nextDelay);
                         } catch (unexpectedError) {
                             //do nothing
                             console.error("unexpected error in set refresh time after error")
@@ -123,6 +179,7 @@ class DataCache {
                         if (dataCache.isClose === true) {
                             return;
                         }
+                        dataCache._failureCount = 0;
                         //cache is not close then set timeout loop again
                         dataCache._refreshAtLoop(asyncRefresh, refreshAt, refreshAt.daysMs);
                     }).catch(err => {
@@ -130,10 +187,58 @@ class DataCache {
                             if (dataCache.isClose === true) {
                                 return;
                             }
-                            console.error("error when refrech cache")
-                            console.error(err.stack)
-                            //cache is not close then set timeout loop again
-                            dataCache._refreshAtLoop(asyncRefresh, refreshAt, refreshAt.daysMs);
+                            dataCache._failureCount++;
+                            if (dataCache._onError) {
+                                dataCache._onError(err);
+                            } else {
+                                console.error("error when refrech cache")
+                                console.error(err.stack)
+                            }
+
+                            if (dataCache._backoffInitialDelay > 0) {
+                                const backoffDelay = getBackoffDelay(
+                                    dataCache._failureCount,
+                                    dataCache._backoffInitialDelay * 1000,
+                                    dataCache._backoffMaxDelay * 1000
+                                );
+                                dataCache._runInMs = backoffDelay;
+                                dataCache._runAt = new Date(Date.now() + backoffDelay);
+                                
+                                const runBackoff = () => {
+                                    dataCache._timeoutId = setTimeout(function() {
+                                        if (dataCache.isClose === true) return;
+                                        asyncRefresh().then(() => {
+                                            if (dataCache.isClose === true) return;
+                                            dataCache._failureCount = 0;
+                                            dataCache._refreshAtLoop(asyncRefresh, refreshAt, refreshAt.daysMs);
+                                        }).catch(backoffErr => {
+                                            try {
+                                                if (dataCache.isClose === true) return;
+                                                dataCache._failureCount++;
+                                                if (dataCache._onError) {
+                                                    dataCache._onError(backoffErr);
+                                                } else {
+                                                    console.error("error when refrech cache")
+                                                    console.error(backoffErr.stack)
+                                                }
+                                                const nextBackoffDelay = getBackoffDelay(
+                                                    dataCache._failureCount,
+                                                    dataCache._backoffInitialDelay * 1000,
+                                                    dataCache._backoffMaxDelay * 1000
+                                                );
+                                                dataCache._runInMs = nextBackoffDelay;
+                                                dataCache._runAt = new Date(Date.now() + nextBackoffDelay);
+                                                runBackoff();
+                                            } catch (unexpectedError) {
+                                                console.error("unexpected error in set refresh time after error")
+                                            }
+                                        });
+                                    }, dataCache._runInMs);
+                                };
+                                runBackoff();
+                            } else {
+                                dataCache._refreshAtLoop(asyncRefresh, refreshAt, refreshAt.daysMs);
+                            }
                         } catch (unexpectedError) {
                             //do nothing
                             console.error("unexpected error in set refresh time after error")
@@ -194,6 +299,7 @@ class DataCache {
 
         const asyncRefresh = async () => {
             if (this.max <= 0) return;// max <=0 then do not refresh since it cannot cache
+            const startTime = Date.now();
             const recentKeys = [];
             if (this.size > 0) {
                 //get recent keys to referesh thier value, the expired key will not be included, and this function do not change recently ness 
@@ -207,23 +313,74 @@ class DataCache {
             if (!isIterator && !isAsyncIterator) throw new Error("fetch return non iterable data");
             const nextIterator = isAsyncIterator ? dataIterator[Symbol.asyncIterator]() : dataIterator[Symbol.iterator]();
             const firstItdata = isAsyncIterator ? await nextIterator.next() : nextIterator.next();
-            if (firstItdata.done === true || !Array.isArray(firstItdata.value)) return;//no data
+            
+            if (firstItdata.done === true || !Array.isArray(firstItdata.value)) {
+                this._refreshes++;
+                if (this._onRefresh) {
+                    this._onRefresh({ durationMs: Date.now() - startTime, keysLoaded: 0, keysUpdated: 0 });
+                }
+                return;//no data
+            }
+            
             const firstItem = { key: firstItdata.value[0], value: firstItdata.value[1] };
-            //reset after check data is valid, and can get first key,value
+            let keysUpdated = 0;
+            let oldValues = null;
+
             if (this.resetOnRefresh == true) {
+                oldValues = new Map();
+                this._cache.forEach((v, k) => {
+                    oldValues.set(k, v);
+                });
+                
+                const hasOld = oldValues.has(firstItem.key);
+                const oldVal = oldValues.get(firstItem.key);
+                if (hasOld && !this._isEqual(oldVal, firstItem.value)) {
+                    keysUpdated++;
+                    this._mismatches++;
+                }
                 //no need to prune since it all
                 this._cache.clear();//reset on each refresh
             } else {
                 this._cache.purgeStale()// remove expired items before insert new fetch so left only non expired recently use cache items.
+                
+                const hasOld = this._cache.has(firstItem.key);
+                const oldVal = this._cache.peek(firstItem.key);
+                if (hasOld && !this._isEqual(oldVal, firstItem.value)) {
+                    keysUpdated++;
+                    this._mismatches++;
+                }
             }
             if (this._missCache !== undefined) this._missCache.purgeStale();
             this._cache.set(firstItem.key, firstItem.value);
-            if (firstItdata.done == true) return; //no more data
+            
             let i = 1; //start from 1 since we already read 1
-            //async iterator
-            for await (const [key, value] of nextIterator) {
-                if ((++i) > this.max) break; // add items do not exceed max
-                this._cache.set(key, value);
+            if (firstItdata.done != true) {
+                //async iterator
+                for await (const [key, value] of nextIterator) {
+                    if ((++i) > this.max) break; // add items do not exceed max
+                    
+                    if (this.resetOnRefresh == true) {
+                        const hasOld = oldValues.has(key);
+                        const oldVal = oldValues.get(key);
+                        if (hasOld && !this._isEqual(oldVal, value)) {
+                            keysUpdated++;
+                            this._mismatches++;
+                        }
+                    } else {
+                        const hasOld = this._cache.has(key);
+                        const oldVal = this._cache.peek(key);
+                        if (hasOld && !this._isEqual(oldVal, value)) {
+                            keysUpdated++;
+                            this._mismatches++;
+                        }
+                    }
+                    this._cache.set(key, value);
+                }
+            }
+            
+            this._refreshes++;
+            if (this._onRefresh) {
+                this._onRefresh({ durationMs: Date.now() - startTime, keysLoaded: i, keysUpdated });
             }
         }
         /**
@@ -237,7 +394,16 @@ class DataCache {
             await this._timeoutLoop(asyncRefresh, this.refreshAge * 1000);
         }
     }
-
+    get metrics() {
+        return {
+            hits: this._hits,
+            misses: this._misses,
+            refreshes: this._refreshes,
+            coalescedFetches: this._coalescedFetches,
+            mismatches: this._mismatches,
+            invalidations: this._invalidations
+        };
+    }
 
     /**
      * get cache value by key, return undefined if not found.
@@ -248,7 +414,20 @@ class DataCache {
      * @returns 
      */
     get(key) {
-        return this._cache.get(key);
+        const val = this._cache.get(key);
+        if (val !== undefined) {
+            if (this._checkValidity && !this._checkValidity(key, val)) {
+                this._cache.delete(key);
+                if (this._missCache !== undefined) this._missCache.delete(key);
+                this._invalidations++;
+                this._misses++;
+                return undefined;
+            }
+            this._hits++;
+            return val;
+        }
+        this._misses++;
+        return undefined;
     }
 
     /**
@@ -302,9 +481,22 @@ class DataCache {
      * @param {*} key 
      * @returns value ehn
      */
-    async getOrFetch(key) {
-        const value = this._cache.get(key);
-        if (value !== undefined) return value;
+    async getOrFetch(key, _trackMetrics = true) {
+        let value = this._cache.get(key);
+        if (value !== undefined) {
+            if (this._checkValidity && !this._checkValidity(key, value)) {
+                this._cache.delete(key);
+                if (this._missCache !== undefined) this._missCache.delete(key);
+                this._invalidations++;
+                if (_trackMetrics) this._misses++;
+                value = undefined;
+            } else {
+                if (_trackMetrics) this._hits++;
+                return value;
+            }
+        } else {
+            if (_trackMetrics) this._misses++;
+        }
 
         if (this._fetchByKey !== undefined) {
             // check miss cache key, if it has been fetched already or not.
@@ -312,6 +504,7 @@ class DataCache {
 
             // Promise Coalescing (Single-flight): merge duplicate requests into one promise
             if (this._pendingFetches.has(key)) {
+                if (_trackMetrics) this._coalescedFetches++;
                 return this._pendingFetches.get(key);
             }
 
@@ -350,10 +543,20 @@ class DataCache {
         const missingKeys = [];
 
         for (const key of keys) {
-            const val = this._cache.get(key);
+            let val = this._cache.get(key);
             if (val !== undefined) {
-                result[key] = val;
+                if (this._checkValidity && !this._checkValidity(key, val)) {
+                    this._cache.delete(key);
+                    if (this._missCache !== undefined) this._missCache.delete(key);
+                    this._invalidations++;
+                    this._misses++;
+                    missingKeys.push(key);
+                } else {
+                    this._hits++;
+                    result[key] = val;
+                }
             } else {
+                this._misses++;
                 missingKeys.push(key);
             }
         }
@@ -364,44 +567,78 @@ class DataCache {
                 const actualMissing = this._missCache !== undefined
                     ? missingKeys.filter(k => this._missCache.peek(k) === undefined)
                     : missingKeys;
+                
                 if (actualMissing.length > 0) {
-                    const fetchedData = this._isAsyncFetchByKeys ? await this._fetchByKeys(actualMissing) : this._fetchByKeys(actualMissing);
-                    if (fetchedData) {
-                        if (typeof fetchedData[Symbol.asyncIterator] === "function") {
-                            for await (const [k, v] of fetchedData) {
-                                if (v !== undefined) {
-                                    this._cache.set(k, v);
-                                    if (keys.includes(k)) {
-                                        result[k] = v;
-                                    }
-                                } else {
-                                    if (this._missCache !== undefined) this._missCache.set(k, true);
-                                }
-                            }
+                    const coalescedKeys = [];
+                    const keysToFetch = [];
+                    for (const k of actualMissing) {
+                        if (this._pendingFetches.has(k)) {
+                            coalescedKeys.push(k);
+                            this._coalescedFetches++;
                         } else {
-                            for (const [k, v] of fetchedData) {
-                                if (v !== undefined) {
-                                    this._cache.set(k, v);
-                                    if (keys.includes(k)) {
-                                        result[k] = v;
-                                    }
-                                } else {
-                                    if (this._missCache !== undefined) this._missCache.set(k, true);
-                                }
-                            }
+                            keysToFetch.push(k);
                         }
                     }
-                    // Mark any keys as misses if the batch fetcher did not return them
-                    for (const k of actualMissing) {
-                        if (result[k] === undefined && this._missCache !== undefined) {
-                            this._missCache.set(k, true);
+
+                    const promisesToAwait = [];
+
+                    for (const k of coalescedKeys) {
+                        promisesToAwait.push(
+                            this._pendingFetches.get(k).then(val => [k, val])
+                        );
+                    }
+
+                    if (keysToFetch.length > 0) {
+                        const batchPromise = (async () => {
+                            try {
+                                const fetchedData = this._isAsyncFetchByKeys ? await this._fetchByKeys(keysToFetch) : this._fetchByKeys(keysToFetch);
+                                const resultMap = new Map();
+                                if (fetchedData) {
+                                    if (typeof fetchedData[Symbol.asyncIterator] === "function") {
+                                        for await (const [k, v] of fetchedData) {
+                                            resultMap.set(k, v);
+                                        }
+                                    } else {
+                                        for (const [k, v] of fetchedData) {
+                                            resultMap.set(k, v);
+                                        }
+                                    }
+                                }
+                                return resultMap;
+                            } finally {
+                                for (const k of keysToFetch) {
+                                    this._pendingFetches.delete(k);
+                                }
+                            }
+                        })();
+
+                        for (const k of keysToFetch) {
+                            const keyPromise = (async () => {
+                                const resultMap = await batchPromise;
+                                const val = resultMap.get(k);
+                                if (val !== undefined) {
+                                    this._cache.set(k, val);
+                                } else {
+                                    if (this._missCache !== undefined) this._missCache.set(k, true);
+                                }
+                                return val;
+                            })();
+                            this._pendingFetches.set(k, keyPromise);
+                            promisesToAwait.push(keyPromise.then(val => [k, val]));
+                        }
+                    }
+
+                    const resolved = await Promise.all(promisesToAwait);
+                    for (const [k, v] of resolved) {
+                        if (v !== undefined && keys.includes(k)) {
+                            result[k] = v;
                         }
                     }
                 }
             } else {
-                // Fallback to calling getOrFetch for each key concurrently (leverages single-flight)
+                // Fallback to calling getOrFetch for each key concurrently (passing false to avoid double counting)
                 const promises = missingKeys.map(async (key) => {
-                    const val = await this.getOrFetch(key);
+                    const val = await this.getOrFetch(key, false);
                     return [key, val];
                 });
                 const resolved = await Promise.all(promises);

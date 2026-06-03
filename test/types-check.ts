@@ -30,6 +30,26 @@ async function runTypeCheck() {
     },
     maxMiss: 10,
     maxAgeMiss: 15,
+    onRefresh: (stats) => {
+      assertType<number>(stats.durationMs);
+      assertType<number>(stats.keysLoaded);
+      assertType<number>(stats.keysUpdated);
+    },
+    onError: (err) => {
+      assertType<any>(err);
+    },
+    checkValidity: (key, value) => {
+      assertType<string>(key);
+      assertType<number>(value);
+      return true;
+    },
+    isEqual: (a, b) => {
+      assertType<number>(a);
+      assertType<number>(b);
+      return a === b;
+    },
+    backoffInitialDelay: 2,
+    backoffMaxDelay: 30,
   };
 
   const cache = new DataCache<string, number>(fetchFn, options);
@@ -42,6 +62,14 @@ async function runTypeCheck() {
   assertType<number>(cache.max);
   assertType<number>(cache.size);
   assertType<boolean | undefined>(cache.isClose);
+
+  // Verify metrics
+  assertType<number>(cache.metrics.hits);
+  assertType<number>(cache.metrics.misses);
+  assertType<number>(cache.metrics.refreshes);
+  assertType<number>(cache.metrics.coalescedFetches);
+  assertType<number>(cache.metrics.mismatches);
+  assertType<number>(cache.metrics.invalidations);
 
   if (cache.refreshAt) {
     assertType<number>(cache.refreshAt.daysMs);
@@ -80,3 +108,4 @@ async function runTypeCheck() {
   await cache.asyncRefresh();
   await cache.close();
 }
+

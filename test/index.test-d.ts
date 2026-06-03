@@ -33,6 +33,12 @@ const options: DataCache.CacheOptions<string, number> = {
   },
   maxMiss: 10,
   maxAgeMiss: 15,
+  onRefresh: (stats: { durationMs: number; keysLoaded: number; keysUpdated: number }) => {},
+  onError: (err: any) => {},
+  checkValidity: (key: string, value: number) => true,
+  isEqual: (a: number, b: number) => a === b,
+  backoffInitialDelay: 2,
+  backoffMaxDelay: 30,
 };
 
 const cacheWithOptions = new DataCache<string, number>(fetchFn, options);
@@ -47,6 +53,16 @@ expectType<number>(cache.max);
 expectType<number>(cache.size);
 expectType<boolean | undefined>(cache.isClose);
 
+// Test metrics properties
+expectType<{
+  hits: number;
+  misses: number;
+  refreshes: number;
+  coalescedFetches: number;
+  mismatches: number;
+  invalidations: number;
+}>(cache.metrics);
+
 if (cache.refreshAt) {
   expectType<number>(cache.refreshAt.daysMs);
   expectType<number>(cache.refreshAt.msFrom00_00);
@@ -59,6 +75,7 @@ if (cache.maxMiss !== undefined) {
 if (cache.maxAgeMiss !== undefined) {
   expectType<number>(cache.maxAgeMiss);
 }
+
 
 // 4. Test instance methods
 expectType<Promise<void>>(cache.init());

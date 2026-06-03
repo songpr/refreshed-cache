@@ -14,6 +14,14 @@ declare class DataCache<K, V> {
   maxAgeMiss?: number;
   readonly size: number;
   readonly isClose?: boolean;
+  readonly metrics: {
+    hits: number;
+    misses: number;
+    refreshes: number;
+    coalescedFetches: number;
+    mismatches: number;
+    invalidations: number;
+  };
 
   init(): Promise<void>;
   asyncRefresh(): Promise<void>;
@@ -40,6 +48,12 @@ declare namespace DataCache {
     fetchByKeys?: (keys: K[]) => Array<[K, V]> | Iterable<[K, V]> | AsyncIterable<[K, V]> | Promise<Array<[K, V]> | Iterable<[K, V]> | AsyncIterable<[K, V]>>;
     maxMiss?: number;
     maxAgeMiss?: number;
+    onRefresh?: (stats: { durationMs: number; keysLoaded: number; keysUpdated: number }) => void;
+    onError?: (err: any) => void;
+    checkValidity?: (key: K, value: V) => boolean;
+    isEqual?: (a: V, b: V) => boolean;
+    backoffInitialDelay?: number;
+    backoffMaxDelay?: number;
   }
 }
 
