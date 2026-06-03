@@ -250,14 +250,14 @@ All results in §5 are produced by the **process-isolated harness** (`benchmark/
 
 ---
 
-## 9. Version 1.8.0 Release & Effective Production Usage Patterns
+## 9. Effective Production Usage Patterns
 
-While caching strategies (like Promise Coalescing and Batching) are not unique to `refreshed-cache` and exist in other tools (e.g. `lru-cache`'s native `.fetch()` API, or `dataloader`), version `1.8.0` wraps them natively within its scheduled refresh and miss-cache structures to make them easy to use.
-
-Below are the key patterns to use `refreshed-cache` effectively in production:
+Below are the key patterns to use `refreshed-cache` effectively in production, with references to the benchmark results that back each claim.
 
 ### Pattern A: Thundering Herd Protection (Promise Coalescing)
-If your app experiences spikes of duplicate requests targeting the same hot keys (e.g., flash sales, breaking news), configuring `fetchByKey` automatically coalesces concurrent misses into a single database query.
+**Benchmark backing:** §5D — combined with batch loading, the new caching logic drops p99 from ~240 ms to ~35–67 ms and cuts DB queries by ~63% (~50k vs ~135k). Coalescing and batching work together; their effects are not isolated separately in the benchmark.
+
+If your app experiences spikes of duplicate requests targeting the same hot keys (e.g., flash sales, breaking news), configuring `fetchByKey` automatically coalesces concurrent misses for the same key into a single database query.
 
 ```javascript
 const Cache = require("refreshed-cache");
@@ -268,14 +268,13 @@ const cache = new Cache(
     max: 100000,
     maxAge: 300,
     fetchByKey: async (id) => {
-      // Multiple concurrent calls for the same ID will coalesce here.
-      // Only ONE database query is executed; others share the same returned Promise.
+      // Multiple concurrent calls for the same ID coalesce here.
+      // Only ONE database query is executed; others share the returned Promise.
       return await db.query("SELECT * FROM products WHERE id = $1", [id]);
     }
   }
 );
 
-// Usage in express router
 app.get("/product/:id", async (req, res) => {
   const product = await cache.getOrFetch(req.params.id);
   res.json(product);
@@ -283,7 +282,9 @@ app.get("/product/:id", async (req, res) => {
 ```
 
 ### Pattern B: Resolving N+1 Database Queries (Bulk Batch Loading)
-When loading dashboard widgets, lists, or feeds that query multiple related entities, use `fetchByKeys` and `cache.getOrFetchMany(keys)`. This groups all missing keys and fetches them in a single batch statement (e.g. `WHERE id IN (...)`) rather than iterating key-by-key.
+**Benchmark backing:** §5D directly measures this. Old logic (key-by-key fetches) fires ~130–162k DB queries at ~9–12k rps. New logic (`getOrFetchMany` with `fetchByKeys`) batches all missed keys into a single `WHERE uuid IN (...)` statement, cutting queries to ~46–54k and boosting throughput to ~21–25k rps — a **2.3–2.7x improvement**.
+
+When loading dashboard widgets, lists, or feeds that need multiple related entities, use `fetchByKeys` and `cache.getOrFetchMany(keys)`.
 
 ```javascript
 const cache = new Cache(
@@ -291,16 +292,13 @@ const cache = new Cache(
   {
     max: 100000,
     maxAge: 300,
-    // Batch fetcher for missing keys
     fetchByKeys: async (ids) => {
-      // Query database once for all missing keys
       const rows = await db.query("SELECT id, name FROM users WHERE id = ANY($1)", [ids]);
       return rows.map(r => [r.id, r]); // Return iterable [key, value] pairs
     }
   }
 );
 
-// Usage in express router
 app.get("/users/bulk", async (req, res) => {
   const userIds = req.query.ids.split(","); // e.g. [1, 5, 8, 12]
   const users = await cache.getOrFetchMany(userIds);
@@ -309,14 +307,15 @@ app.get("/users/bulk", async (req, res) => {
 ```
 
 ### Pattern C: Active-Only Memory-Efficient Caching (For Huge Datasets)
-When your database contains millions of records (e.g., 10M or 100M rows), caching the entire dataset in-process is impossible. Use the **Active-Only Refresh** strategy. It regularly refreshes only the keys that have been read since the last refresh interval, keeping the hot set warm while bounding memory usage.
+**Benchmark backing:** §5B directly measures this against a 10M-row database. Strategy C (Active-Only Refresh) achieves the same **~95% hit rate** as full-refresh strategies while firing only **~601 DB queries per 30-second window** vs ~51,000–53,000 for Strategy A/B — a **90x query reduction**. Peak heap stays at ~44–48 MB regardless of the 10M-row dataset size.
+
+When your database contains millions of records, caching the entire dataset in-process is impractical. The Active-Only Refresh strategy refreshes only the keys accessed since the last interval, keeping the hot set warm while bounding memory.
 
 ```javascript
 const cache = new Cache(
   async (recentKeys) => {
     // recentKeys lists only keys accessed since the last refresh cycle
     if (!recentKeys || recentKeys.length === 0) return [];
-    
     const rows = await db.query("SELECT id, data FROM profiles WHERE id = ANY($1)", [recentKeys]);
     return rows.map(r => [r.id, r.data]);
   },
@@ -331,9 +330,9 @@ const cache = new Cache(
 ```
 
 ### Pattern D: Safeguarding against Cache Penetration (Hard Miss Protection)
-When clients query non-existent keys (e.g. `product-non-existent-999`), a cache miss normally forces a database query. A flood of non-existent queries can take down your database (Cache Penetration Attack). 
+**Benchmark backing:** Not directly benchmarked. The benchmarks include 5% hard-miss traffic (§5A) but do not measure `maxMiss`/`maxAgeMiss` in isolation. The mechanism is correct — `undefined` returned from `fetchByKey` is stored in the bounded miss-cache — but no throughput or query-count numbers are available to cite.
 
-Configure `maxMiss` and `maxAgeMiss` to track non-existent keys in a separate bounded miss-cache, preventing database lookup spam.
+When clients flood requests for non-existent keys, each cache miss triggers a DB query with no benefit. Configure `maxMiss` and `maxAgeMiss` to absorb repeat lookups for non-existent keys in a bounded sidecar cache.
 
 ```javascript
 const cache = new Cache(
@@ -342,9 +341,9 @@ const cache = new Cache(
     max: 100000,
     fetchByKey: async (sku) => {
       const item = await db.query("SELECT * FROM items WHERE sku = $1", [sku]);
-      return item || undefined; // Returning undefined puts the key into the miss cache
+      return item || undefined; // undefined → stored in miss-cache, no future DB hit
     },
-    maxMiss: 10000,      // Bounded tracking for non-existent SKUs
+    maxMiss: 10000,      // Bounded miss-cache for non-existent SKUs
     maxAgeMiss: 60       // Lock out non-existent keys for 60 seconds
   }
 );
