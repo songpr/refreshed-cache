@@ -36,6 +36,7 @@ The database is populated with **10,000,000** records generated via a fast SQL g
 - `run-long-benchmark.js`: Simulates caching strategies over multiple intervals, verifying memory limits and garbage collection behavior.
 - `run-load-test.js`: Sustained concurrent user load test comparing local caching against Direct Prepared Statements (No Cache).
 - `run-new-features-benchmark.js`: Evaluates performance ROI of Single-flight Promise Coalescing and Bulk Batch Loading.
+- `run-miss-cache-benchmark.js`: Measures DB query reduction from miss-cache (Pattern D). Compares `maxMiss: 0` (disabled) vs `maxMiss: 10000` under 5% bogus-key penetration traffic.
 
 ---
 
@@ -89,6 +90,9 @@ node benchmark/run-load-test.js --rounds=5 --duration=30
 
 # 4. New Features Benchmark (5 rounds, 30s duration)
 node benchmark/run-new-features-benchmark.js --rounds=5 --duration=30
+
+# 5. Miss Cache Benchmark (5 rounds, 30s duration)
+node benchmark/run-miss-cache-benchmark.js --rounds=5 --duration=30
 ```
 
 ---
@@ -329,8 +333,40 @@ const cache = new Cache(
 );
 ```
 
+### Pattern A (Base): Scheduled Full-Refresh (Warm Cache, Small/Medium Dataset)
+**Benchmark backing:** §5B Strategy A. Achieves ~95% hit rate with 2,000 rps sustained throughput and p50 latency of ~0.05–0.08 ms. DB queries scale with dataset size and refresh interval, not with read QPS.
+
+This is the simplest pattern: load the entire working set once at startup, then refresh it on a fixed timer. Every read is a pure in-process LRU lookup — no DB query, no network round-trip. Use this when your dataset fits comfortably in memory and you can tolerate eventual consistency up to `refreshAge` seconds.
+
+```javascript
+const Cache = require("refreshed-cache");
+
+const cache = new Cache(
+  async () => {
+    // Fetch and return all rows as [key, value] pairs
+    const rows = await db.query("SELECT id, data FROM config_items ORDER BY priority");
+    return rows.map(r => [r.id, r.data]);
+  },
+  {
+    max: 50000,       // Max keys to keep in memory
+    maxAge: 600,      // Evict entries older than 10 minutes
+    refreshAge: 300,  // Re-fetch the full set every 5 minutes
+    resetOnRefresh: true  // Replace cache contents on each refresh
+  }
+);
+
+await cache.init(); // Load initial data and start the refresh loop
+
+app.get("/config/:id", (req, res) => {
+  const item = cache.get(req.params.id); // Pure in-process lookup, <0.1 ms
+  res.json(item ?? null);
+});
+```
+
 ### Pattern D: Safeguarding against Cache Penetration (Hard Miss Protection)
-**Benchmark backing:** Not directly benchmarked. The benchmarks include 5% hard-miss traffic (§5A) but do not measure `maxMiss`/`maxAgeMiss` in isolation. The mechanism is correct — `undefined` returned from `fetchByKey` is stored in the bounded miss-cache — but no throughput or query-count numbers are available to cite.
+**Benchmark backing:** `benchmark/run-miss-cache-benchmark.js` (§E, run separately). The benchmark fires 5% bogus-key traffic against a fixed pool of 5,000 non-existent keys alongside 95% valid traffic over 30 seconds. With `maxMiss: 0` (disabled), each of the repeated bogus lookups triggers a fresh DB query. With `maxMiss: 10000, maxAgeMiss: 60`, the second and subsequent lookups for each bogus key are absorbed in the in-process miss-cache — **cutting bogus-key DB queries to near zero** after the first lookup per key, reducing overall DB query volume proportionally to the bogus-traffic fraction.
+
+**`maxMiss: 0` explicitly disables miss-cache** (honors the documented semantics — repeated non-existent keys always hit the DB). Default is 2000 when `fetchByKey` or `fetchByKeys` is configured.
 
 When clients flood requests for non-existent keys, each cache miss triggers a DB query with no benefit. Configure `maxMiss` and `maxAgeMiss` to absorb repeat lookups for non-existent keys in a bounded sidecar cache.
 
@@ -345,6 +381,7 @@ const cache = new Cache(
     },
     maxMiss: 10000,      // Bounded miss-cache for non-existent SKUs
     maxAgeMiss: 60       // Lock out non-existent keys for 60 seconds
+    // maxMiss: 0        // Set to 0 to disable miss-cache entirely
   }
 );
 ```

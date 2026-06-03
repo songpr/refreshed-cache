@@ -77,7 +77,8 @@ Therefore items must be sorted by its prority, which the most important one is t
 * `max` The maximum size of the cache. Setting it to 0 then no data will be cached.
    Default is 10000.
 
-* `maxAge` Maximum age in second. Expired items will be removed every refreshAge. 
+* `maxAge` Maximum age in second. Expired items will be removed every refreshAge.
+   Setting it to 0 disables TTL expiry (items live until evicted by LRU pressure).
    Default is 600 seconds.
 
 * `refreshAge` refresh time in second. New data will be fetch on each refresh and expired items will be removed every refreshAge.
@@ -97,9 +98,9 @@ Therefore items must be sorted by its prority, which the most important one is t
 
 * `fetchByKey` - function/async function use to fetch value by key and and keep it to cache. fetchByKey must return value (null is count as a value), and return undefined when no data found.
 
-* `maxMiss` -  if fetchByKey is set then this is the maximum size of the miss cache key. Setting it to 0 then no miss cache will be cached; default is 2000. if the key is fouud in miss cache key, fetchByKey will not be called.
+* `maxMiss` - if `fetchByKey` or `fetchByKeys` is set, this is the maximum size of the miss-cache (bounded sidecar LRU for non-existent keys). Setting it to `0` disables the miss-cache entirely — repeated lookups for non-existent keys will always call the fetch function. Default is 2000.
 
-* `maxAgeMiss` - if fetchByKey is set this is Maximum age of miss cache key in second. Expired items will be removed every refreshAge; default is refreshAge.
+* `maxAgeMiss` - if `fetchByKey` or `fetchByKeys` is set, this is the maximum age of a miss-cache entry in seconds. Setting it to `0` means miss entries never expire by age (they are only evicted by LRU pressure when the miss-cache reaches `maxMiss`). Default is `refreshAge`.
 ## API
 
 * `async init()`

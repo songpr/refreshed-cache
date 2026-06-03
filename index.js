@@ -35,10 +35,10 @@ class DataCache {
         Object.defineProperty(this, "_fetch", { value: fetch, configurable: false, enumerable: false, writable: false });
         const _isAsyncFetch = util.types.isAsyncFunction(fetch);
         Object.defineProperty(this, "_isAsyncFetch", { get: () => _isAsyncFetch, configurable: false, enumerable: false });
-        const maxAge = options.maxAge || 600;
-        if (!Number.isInteger(maxAge)) throw new Error("Invalid maxAge");
-        const refreshAge = options.refreshAge || maxAge;
-        if (!Number.isInteger(refreshAge)) throw new Error("Invalid refreshAge");
+        const maxAge = options.maxAge === undefined ? 600 : options.maxAge;
+        if (!Number.isInteger(maxAge) || maxAge < 0) throw new Error("Invalid maxAge");
+        const refreshAge = options.refreshAge === undefined ? maxAge : options.refreshAge;
+        if (!Number.isInteger(refreshAge) || refreshAge < 0) throw new Error("Invalid refreshAge");
         const resetOnRefresh = options.resetOnRefresh === undefined ? true : options.resetOnRefresh;
         if (typeof (resetOnRefresh) !== "boolean") throw new Error("Invalid resetOnRefresh");
         if (options.refreshAt != null) {
@@ -61,7 +61,7 @@ class DataCache {
         Object.defineProperty(this, "refreshAge", { get: () => refreshAge, configurable: false, enumerable: true });
         Object.defineProperty(this, "resetOnRefresh", { get: () => resetOnRefresh, configurable: false, enumerable: true });
         Object.defineProperty(this, "max", { get: () => max, configurable: false, enumerable: true });
-        const _lruCache = new LRUCache({ max: max, ttl: maxAge * 1000 })
+        const _lruCache = new LRUCache(maxAge > 0 ? { max: max, ttl: maxAge * 1000 } : { max: max })
         Object.defineProperty(this, "_cache", { get: () => _lruCache, configurable: false, enumerable: false });
         Object.defineProperty(this, "size", { get: () => _lruCache.size, configurable: false, enumerable: true });
 
@@ -150,14 +150,16 @@ class DataCache {
             Object.defineProperty(this, "_fetchByKey", { value: fetchByKey, configurable: false, enumerable: false, writable: false });
             const _isAsyncFetchByKey = util.types.isAsyncFunction(fetchByKey);
             Object.defineProperty(this, "_isAsyncFetchByKey", { get: () => _isAsyncFetchByKey, configurable: false, enumerable: false });
-            const maxMiss = options.maxMiss || 2000;
-            if (!Number.isInteger(maxMiss)) throw new Error("Invalid maxMiss");
-            const maxAgeMiss = options.maxAgeMiss || refreshAge;
-            if (!Number.isInteger(maxAgeMiss)) throw new Error("Invalid maxAgeMiss");
-            const _missLRUCache = new LRUCache({ max: maxMiss, ttl: maxAgeMiss * 1000 })
-            Object.defineProperty(this, "_missCache", { get: () => _missLRUCache, configurable: false, enumerable: false });
+            const maxMiss = options.maxMiss === undefined ? 2000 : options.maxMiss;
+            if (!Number.isInteger(maxMiss) || maxMiss < 0) throw new Error("Invalid maxMiss");
+            const maxAgeMiss = options.maxAgeMiss === undefined ? refreshAge : options.maxAgeMiss;
+            if (!Number.isInteger(maxAgeMiss) || maxAgeMiss < 0) throw new Error("Invalid maxAgeMiss");
             Object.defineProperty(this, "maxMiss", { get: () => maxMiss, configurable: false, enumerable: true });
             Object.defineProperty(this, "maxAgeMiss", { get: () => maxAgeMiss, configurable: false, enumerable: true });
+            if (maxMiss > 0) {
+                const _missLRUCache = new LRUCache(maxAgeMiss > 0 ? { max: maxMiss, ttl: maxAgeMiss * 1000 } : { max: maxMiss })
+                Object.defineProperty(this, "_missCache", { get: () => _missLRUCache, configurable: false, enumerable: false });
+            }
         }
 
         const fetchByKeys = options.fetchByKeys;
@@ -165,15 +167,17 @@ class DataCache {
             Object.defineProperty(this, "_fetchByKeys", { value: fetchByKeys, configurable: false, enumerable: false, writable: false });
             const _isAsyncFetchByKeys = util.types.isAsyncFunction(fetchByKeys);
             Object.defineProperty(this, "_isAsyncFetchByKeys", { get: () => _isAsyncFetchByKeys, configurable: false, enumerable: false });
-            if (this._missCache === undefined) {
-                const maxMiss = options.maxMiss || 2000;
-                if (!Number.isInteger(maxMiss)) throw new Error("Invalid maxMiss");
-                const maxAgeMiss = options.maxAgeMiss || refreshAge;
-                if (!Number.isInteger(maxAgeMiss)) throw new Error("Invalid maxAgeMiss");
-                const _missLRUCache = new LRUCache({ max: maxMiss, ttl: maxAgeMiss * 1000 })
-                Object.defineProperty(this, "_missCache", { get: () => _missLRUCache, configurable: false, enumerable: false });
+            if (!('maxMiss' in this)) {
+                const maxMiss = options.maxMiss === undefined ? 2000 : options.maxMiss;
+                if (!Number.isInteger(maxMiss) || maxMiss < 0) throw new Error("Invalid maxMiss");
+                const maxAgeMiss = options.maxAgeMiss === undefined ? refreshAge : options.maxAgeMiss;
+                if (!Number.isInteger(maxAgeMiss) || maxAgeMiss < 0) throw new Error("Invalid maxAgeMiss");
                 Object.defineProperty(this, "maxMiss", { get: () => maxMiss, configurable: false, enumerable: true });
                 Object.defineProperty(this, "maxAgeMiss", { get: () => maxAgeMiss, configurable: false, enumerable: true });
+                if (maxMiss > 0) {
+                    const _missLRUCache = new LRUCache(maxAgeMiss > 0 ? { max: maxMiss, ttl: maxAgeMiss * 1000 } : { max: maxMiss })
+                    Object.defineProperty(this, "_missCache", { get: () => _missLRUCache, configurable: false, enumerable: false });
+                }
             }
         }
 
@@ -304,7 +308,7 @@ class DataCache {
 
         if (this._fetchByKey !== undefined) {
             // check miss cache key, if it has been fetched already or not.
-            if (this._missCache.peek(key) !== undefined) return undefined;
+            if (this._missCache !== undefined && this._missCache.peek(key) !== undefined) return undefined;
 
             // Promise Coalescing (Single-flight): merge duplicate requests into one promise
             if (this._pendingFetches.has(key)) {
@@ -318,7 +322,7 @@ class DataCache {
                     if (newValue !== undefined) {
                         this._cache.set(key, newValue);
                     } else {
-                        this._missCache.set(key, true);
+                        if (this._missCache !== undefined) this._missCache.set(key, true);
                     }
                     return newValue;
                 } finally {
@@ -357,7 +361,9 @@ class DataCache {
         if (missingKeys.length > 0) {
             if (this._fetchByKeys !== undefined) {
                 // Filter out keys already in the miss cache
-                const actualMissing = missingKeys.filter(k => this._missCache.peek(k) === undefined);
+                const actualMissing = this._missCache !== undefined
+                    ? missingKeys.filter(k => this._missCache.peek(k) === undefined)
+                    : missingKeys;
                 if (actualMissing.length > 0) {
                     const fetchedData = this._isAsyncFetchByKeys ? await this._fetchByKeys(actualMissing) : this._fetchByKeys(actualMissing);
                     if (fetchedData) {
@@ -369,7 +375,7 @@ class DataCache {
                                         result[k] = v;
                                     }
                                 } else {
-                                    this._missCache.set(k, true);
+                                    if (this._missCache !== undefined) this._missCache.set(k, true);
                                 }
                             }
                         } else {
@@ -380,14 +386,14 @@ class DataCache {
                                         result[k] = v;
                                     }
                                 } else {
-                                    this._missCache.set(k, true);
+                                    if (this._missCache !== undefined) this._missCache.set(k, true);
                                 }
                             }
                         }
                     }
                     // Mark any keys as misses if the batch fetcher did not return them
                     for (const k of actualMissing) {
-                        if (result[k] === undefined) {
+                        if (result[k] === undefined && this._missCache !== undefined) {
                             this._missCache.set(k, true);
                         }
                     }

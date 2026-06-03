@@ -60,3 +60,59 @@ test("list options", () => {
     expect(options.length).toEqual(6);
     expect(options).toEqual(expect.arrayContaining(["maxAge", "refreshAge", "resetOnRefresh", "max", "size", "passRecentKeysOnRefresh"]))
 })
+
+test("maxAge: 0 is honoured (no TTL)", () => {
+    const fn = () => [];
+    const dataCache = new (require("../index"))(fn, { maxAge: 0 });
+    expect(dataCache.maxAge).toBe(0);
+})
+
+test("refreshAge: 0 is honoured", () => {
+    const fn = () => [];
+    const dataCache = new (require("../index"))(fn, { refreshAge: 0 });
+    expect(dataCache.refreshAge).toBe(0);
+})
+
+test("maxMiss: 0 disables miss cache — fetchByKey still works but repeated misses always query", async () => {
+    let calls = 0;
+    const data = { a: 1 };
+    const fn = () => [];
+    const cache = new (require("../index"))(fn, {
+        maxMiss: 0,
+        fetchByKey: async (key) => { calls++; return data[key]; }
+    });
+    await cache.init();
+    expect(cache.maxMiss).toBe(0);
+    // _missCache must not exist when maxMiss === 0
+    expect(cache._missCache).toBeUndefined();
+    // 'z' does not exist — should call fetchByKey every time (no miss-cache to short-circuit)
+    expect(await cache.getOrFetch('z')).toBeUndefined();
+    expect(await cache.getOrFetch('z')).toBeUndefined();
+    expect(calls).toBe(2);
+    await cache.close();
+})
+
+test("maxMiss: 0 disables miss cache — fetchByKeys path", async () => {
+    let calls = 0;
+    const fn = () => [];
+    const cache = new (require("../index"))(fn, {
+        maxMiss: 0,
+        fetchByKeys: async (keys) => { calls++; return []; }
+    });
+    await cache.init();
+    expect(cache.maxMiss).toBe(0);
+    expect(cache._missCache).toBeUndefined();
+    await cache.getOrFetchMany(['z']);
+    await cache.getOrFetchMany(['z']);
+    expect(calls).toBe(2);
+    await cache.close();
+})
+
+test("maxAgeMiss: 0 is honoured (miss entries never expire)", () => {
+    const fn = () => [];
+    const cache = new (require("../index"))(fn, {
+        fetchByKey: async (key) => undefined,
+        maxAgeMiss: 0
+    });
+    expect(cache.maxAgeMiss).toBe(0);
+})
