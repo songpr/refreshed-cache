@@ -28,7 +28,7 @@ const sleep = ms => new Promise(res => setTimeout(res, ms));
 async function runLoadTestStrategy(name, setupCacheFn) {
     console.log(`\n======================================================`);
     console.log(`LOAD TEST STRATEGY: ${name}`);
-    console.log(`Duration: ${TOTAL_DURATION_SEC}s | Interval stats: 30s`);
+    console.log(`Duration: ${TOTAL_DURATION_SEC}s | Interval stats: 30s | Ceiling: 100,000 keys`);
     console.log(`======================================================`);
 
     getMemoryUsage();
@@ -48,7 +48,7 @@ async function runLoadTestStrategy(name, setupCacheFn) {
     const cache = await setupCacheFn(trackedSql);
 
     // Load UUID universe
-    const allRows = await sql`SELECT uuid FROM users LIMIT 100000`;
+    const allRows = await sql`SELECT uuid FROM users LIMIT 150000`;
     const uuidsUniverse = allRows.map(r => r.uuid);
 
     const startTime = Date.now();
@@ -76,7 +76,7 @@ async function runLoadTestStrategy(name, setupCacheFn) {
 
             // Sliding window of hot keys (simulates real shifting traffic over 10 minutes)
             const elapsedTimeSec = (Date.now() - startTime) / 1000;
-            const windowSize = 15000;
+            const windowSize = 120000;
             const windowStart = Math.floor(elapsedTimeSec * 100) % (uuidsUniverse.length - windowSize);
             const hotPool = uuidsUniverse.slice(windowStart, windowStart + windowSize);
 
@@ -132,7 +132,7 @@ async function runLoadTestStrategy(name, setupCacheFn) {
     const workerPromises = Array.from({ length: 4 }, () => runWorker());
 
     // Monitor loop reporting stats every 30s
-    const totalIntervals = TOTAL_DURATION_SEC / intervalSec;
+    const totalIntervals = Math.max(1, Math.round(TOTAL_DURATION_SEC / intervalSec));
     for (let t = 1; t <= totalIntervals; t++) {
         await sleep(intervalSec * 1000);
 
@@ -154,7 +154,7 @@ async function runLoadTestStrategy(name, setupCacheFn) {
         const throughput = Math.round(requests / intervalSec);
         const mem = getMemoryUsage();
 
-        console.log(`[${t * intervalSec}s] Ops: ${throughput}/sec | Hit Rate: ${((hits / requests) * 100).toFixed(1)}% | p50: ${p50}ms, p95: ${p95}ms, p99: ${p99}ms | DB Queries: ${dbQueryCount} | Heap: ${mem.heapUsed} MB | RSS: ${mem.rss} MB`);
+        console.log(`[${t * intervalSec}s] Cache Size: ${cache ? cache.size : 'N/A'} | Ops: ${throughput}/sec | Hit Rate: ${((hits / requests) * 100).toFixed(1)}% | p50: ${p50}ms, p95: ${p95}ms, p99: ${p99}ms | DB Queries: ${dbQueryCount} | Heap: ${mem.heapUsed} MB | RSS: ${mem.rss} MB`);
 
         statsHistory.push({
             elapsed: t * intervalSec,
@@ -200,72 +200,86 @@ async function runLoadTestStrategy(name, setupCacheFn) {
 }
 
 async function main() {
+    // Parse arguments
+    const args = process.argv.slice(2);
+    const roundsArg = args.find(arg => arg.startsWith('--rounds='));
+    const rounds = roundsArg ? parseInt(roundsArg.split('=')[1], 10) : 1;
+
     // Warm up DB
     await Promise.all(Array.from({ length: 10 }, () => sql`SELECT 1`));
 
     const results = [];
 
-    // Strategy 1: Direct Prepared Statements (No Cache)
-    results.push(await runLoadTestStrategy(
-        'Direct Prepared Statements (No Cache)',
-        async () => null
-    ));
-    await sleep(5000);
+    for (let r = 1; r <= rounds; r++) {
+        const prefix = rounds > 1 ? `[Round ${r}] ` : '';
+        console.log(`\n\n=== ROUND ${r} OF ${rounds} ===`);
 
-    // Strategy 2: Lazy Fetch-on-Miss (max: 10000)
-    results.push(await runLoadTestStrategy(
-        'Lazy Fetch-on-Miss (max: 10000)',
-        async (trackedSql) => {
-            const cache = new DataCache(
-                async () => [],
-                {
-                    max: 10000,
-                    maxAge: 30,
-                    refreshAge: 30,
-                    resetOnRefresh: false,
-                    fetchByKey: async (key) => {
-                        const [row] = await trackedSql`SELECT uuid, name, email, metadata FROM users WHERE uuid = ${key}`;
-                        return row || undefined;
-                    }
-                }
-            );
-            await cache.init();
-            return cache;
-        }
-    ));
-    await sleep(5000);
+        // Strategy 1: Direct Prepared Statements (No Cache)
+        results.push(await runLoadTestStrategy(
+            `${prefix}Direct Prepared Statements (No Cache)`,
+            async () => null
+        ));
+        await sleep(5000);
 
-    // Strategy 3: Active-Only Refresh Cache (max: 10000)
-    results.push(await runLoadTestStrategy(
-        'Active-Only Refresh Cache (max: 10000)',
-        async (trackedSql) => {
-            const cache = new DataCache(
-                async (recentKeys) => {
-                    if (recentKeys && recentKeys.length > 0) {
-                        const rows = await trackedSql`SELECT uuid, name, email, metadata FROM users WHERE uuid IN ${trackedSql(recentKeys)}`;
-                        return rows.map(r => [r.uuid, r]);
+        // Strategy 2: Lazy Fetch-on-Miss (max: 100000)
+        results.push(await runLoadTestStrategy(
+            `${prefix}Lazy Fetch-on-Miss (max: 100000)`,
+            async (trackedSql) => {
+                const cache = new DataCache(
+                    async () => [],
+                    {
+                        max: 100000,
+                        maxAge: 30,
+                        refreshAge: 30,
+                        resetOnRefresh: false,
+                        fetchByKey: async (key) => {
+                            const [row] = await trackedSql`SELECT uuid, name, email, metadata FROM users WHERE uuid = ${key}`;
+                            return row || undefined;
+                        }
                     }
-                    return [];
-                },
-                {
-                    max: 10000,
-                    maxAge: 30,
-                    refreshAge: 30,
-                    resetOnRefresh: false,
-                    passRecentKeysOnRefresh: true,
-                    fetchByKey: async (key) => {
-                        const [row] = await trackedSql`SELECT uuid, name, email, metadata FROM users WHERE uuid = ${key}`;
-                        return row || undefined;
+                );
+                await cache.init();
+                return cache;
+            }
+        ));
+        await sleep(5000);
+
+        // Strategy 3: Active-Only Refresh Cache (max: 100000)
+        results.push(await runLoadTestStrategy(
+            `${prefix}Active-Only Refresh Cache (max: 100000)`,
+            async (trackedSql) => {
+                const cache = new DataCache(
+                    async (recentKeys) => {
+                        if (recentKeys && recentKeys.length > 0) {
+                            const rows = await trackedSql`SELECT uuid, name, email, metadata FROM users WHERE uuid IN ${trackedSql(recentKeys)}`;
+                            return rows.map(r => [r.uuid, r]);
+                        }
+                        return [];
+                    },
+                    {
+                        max: 100000,
+                        maxAge: 30,
+                        refreshAge: 30,
+                        resetOnRefresh: false,
+                        passRecentKeysOnRefresh: true,
+                        fetchByKey: async (key) => {
+                            const [row] = await trackedSql`SELECT uuid, name, email, metadata FROM users WHERE uuid = ${key}`;
+                            return row || undefined;
+                        }
                     }
-                }
-            );
-            await cache.init();
-            return cache;
+                );
+                await cache.init();
+                return cache;
+            }
+        ));
+
+        if (r < rounds) {
+            await sleep(5000);
         }
-    ));
+    }
 
     console.log(`\n======================================================`);
-    console.log(`LOAD TEST RESULTS & ROI ANALYSIS`);
+    console.log(`LOAD TEST RESULTS & ROI ANALYSIS (${rounds} ROUNDS)`);
     console.log(`======================================================`);
     console.table(results.map(r => ({
         'Strategy': r.name,

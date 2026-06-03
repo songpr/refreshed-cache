@@ -49,6 +49,15 @@ async function runScenario(scenarioName, cacheSize, dbRowsCount, totalQueries = 
         }
     }
 
+    // Define query tracking logic
+    let dbQueryCount = 0;
+    const trackedSql = (queryParts, ...values) => {
+        if (queryParts && Array.isArray(queryParts) && queryParts.raw) {
+            dbQueryCount++;
+        }
+        return sql(queryParts, ...values);
+    };
+
     // 2. Initialize Cache
     console.log('Initializing Cache...');
     const memBeforeCache = getMemoryUsage();
@@ -57,11 +66,11 @@ async function runScenario(scenarioName, cacheSize, dbRowsCount, totalQueries = 
         async (recentKeys) => {
             if (recentKeys && recentKeys.length > 0) {
                 // Batch fetch recent keys
-                const rows = await sql`SELECT uuid, name, email, metadata FROM users WHERE uuid IN ${sql(recentKeys)}`;
+                const rows = await trackedSql`SELECT uuid, name, email, metadata FROM users WHERE uuid IN ${sql(recentKeys)}`;
                 return rows.map(r => [r.uuid, r]);
             } else {
                 // Initial load
-                const rows = await sql`SELECT uuid, name, email, metadata FROM users ORDER BY id ASC LIMIT ${cacheSize}`;
+                const rows = await trackedSql`SELECT uuid, name, email, metadata FROM users ORDER BY id ASC LIMIT ${cacheSize}`;
                 return rows.map(r => [r.uuid, r]);
             }
         },
@@ -72,7 +81,7 @@ async function runScenario(scenarioName, cacheSize, dbRowsCount, totalQueries = 
             resetOnRefresh: false,
             passRecentKeysOnRefresh: true,
             fetchByKey: async (uuid) => {
-                const [row] = await sql`SELECT uuid, name, email, metadata FROM users WHERE uuid = ${uuid}`;
+                const [row] = await trackedSql`SELECT uuid, name, email, metadata FROM users WHERE uuid = ${uuid}`;
                 return row || undefined;
             }
         }
@@ -86,7 +95,8 @@ async function runScenario(scenarioName, cacheSize, dbRowsCount, totalQueries = 
     console.log(`Cache initialized in ${initDuration}ms. Memory overhead: Heap +${(memAfterCache.heapUsed - memBeforeCache.heapUsed).toFixed(2)} MB, RSS +${(memAfterCache.rss - memBeforeCache.rss).toFixed(2)} MB`);
 
     // 3. Run Benchmark against Direct DB (No Cache)
-    console.log(`\nRunning direct DB queries (No Cache) with ${totalQueries} operations...`);
+    console.log(`\nRunning Direct Prepared Statements (No Cache) with ${totalQueries} operations...`);
+    dbQueryCount = 0;
     const dbStart = Date.now();
     let dbSuccessCount = 0;
     
@@ -94,7 +104,7 @@ async function runScenario(scenarioName, cacheSize, dbRowsCount, totalQueries = 
     for (let i = 0; i < queryKeys.length; i += batchConcurrency) {
         const batch = queryKeys.slice(i, i + batchConcurrency);
         const promises = batch.map(async (key) => {
-            const [row] = await sql`SELECT uuid, name, email, metadata FROM users WHERE uuid = ${key}`;
+            const [row] = await trackedSql`SELECT uuid, name, email, metadata FROM users WHERE uuid = ${key}`;
             return row;
         });
         const results = await Promise.all(promises);
@@ -102,12 +112,13 @@ async function runScenario(scenarioName, cacheSize, dbRowsCount, totalQueries = 
     }
     const dbDuration = Date.now() - dbStart;
     const dbOpsPerSec = Math.round((totalQueries / dbDuration) * 1000);
-    const dbMem = getMemoryUsage();
+    const dbQueriesDirect = dbQueryCount;
     
-    console.log(`Direct DB: ${dbDuration}ms (${dbOpsPerSec} ops/sec) | Hits found: ${dbSuccessCount}`);
+    console.log(`Direct Prepared Statements (No Cache): ${dbDuration}ms (${dbOpsPerSec} ops/sec) | Hits found: ${dbSuccessCount} | DB Queries: ${dbQueriesDirect}`);
 
     // 4. Run Benchmark against Cache
     console.log(`\nRunning Cache queries with ${totalQueries} operations...`);
+    dbQueryCount = 0;
     const cacheStart = Date.now();
     let cacheSuccessCount = 0;
     let correctnessFailed = false;
@@ -135,9 +146,9 @@ async function runScenario(scenarioName, cacheSize, dbRowsCount, totalQueries = 
     }
     const cacheDuration = Date.now() - cacheStart;
     const cacheOpsPerSec = Math.round((totalQueries / cacheDuration) * 1000);
-    const cacheMem = getMemoryUsage();
+    const dbQueriesCache = dbQueryCount;
 
-    console.log(`Cache: ${cacheDuration}ms (${cacheOpsPerSec} ops/sec) | Hits found: ${cacheSuccessCount}`);
+    console.log(`Cache: ${cacheDuration}ms (${cacheOpsPerSec} ops/sec) | Hits found: ${cacheSuccessCount} | DB Queries: ${dbQueriesCache}`);
     console.log(`Correctness Check: ${correctnessFailed ? '❌ FAILED' : '✅ PASSED'}`);
 
     // Clean up
@@ -149,8 +160,10 @@ async function runScenario(scenarioName, cacheSize, dbRowsCount, totalQueries = 
         initDurationMs: initDuration,
         dbDurationMs: dbDuration,
         dbOpsPerSec,
+        dbQueriesDirect,
         cacheDurationMs: cacheDuration,
         cacheOpsPerSec,
+        dbQueriesCache,
         speedup: (dbDuration / cacheDuration).toFixed(2),
         correctness: !correctnessFailed ? 'PASSED' : 'FAILED',
         cacheMemoryHeapMB: (memAfterCache.heapUsed - memBeforeCache.heapUsed).toFixed(2),
@@ -159,6 +172,11 @@ async function runScenario(scenarioName, cacheSize, dbRowsCount, totalQueries = 
 }
 
 async function main() {
+    // Parse rounds parameter
+    const args = process.argv.slice(2);
+    const roundsArg = args.find(arg => arg.startsWith('--rounds='));
+    const rounds = roundsArg ? parseInt(roundsArg.split('=')[1], 10) : 1;
+
     // Wait for DB connection
     let retries = 5;
     while (retries > 0) {
@@ -178,24 +196,35 @@ async function main() {
 
     const results = [];
 
-    // Scenario 1: Cache 10,000 for 1,000,000 rows
-    results.push(await runScenario('Small Cache (1% coverage)', 10000, 1000000));
+    for (let r = 1; r <= rounds; r++) {
+        const prefix = rounds > 1 ? `[Round ${r}] ` : '';
+        console.log(`\n\n=== ROUND ${r} OF ${rounds} ===`);
 
-    // Scenario 2: Cache 100,000 for 1,000,000 rows
-    results.push(await runScenario('Medium Cache (10% coverage)', 100000, 1000000));
+        // Scenario 1: Cache 10,000 for 10,000,000 rows
+        results.push(await runScenario(`${prefix}Small Cache (1% coverage)`, 10000, 10000000));
 
-    // Scenario 3: Cache 500,000 for 1,000,000 rows
-    results.push(await runScenario('Large Cache (50% coverage)', 500000, 1000000));
+        // Scenario 2: Cache 100,000 for 10,000,000 rows
+        results.push(await runScenario(`${prefix}Medium Cache (10% coverage)`, 100000, 10000000));
+
+        // Scenario 3: Cache 500,000 for 10,000,000 rows
+        results.push(await runScenario(`${prefix}Large Cache (50% coverage)`, 500000, 10000000));
+
+        if (r < rounds) {
+            await sleep(2000);
+        }
+    }
 
     console.log(`\n======================================================`);
-    console.log(`SUMMARY RESULTS`);
+    console.log(`SUMMARY RESULTS (${rounds} ROUNDS)`);
     console.log(`======================================================`);
     console.table(results.map(r => ({
         'Scenario': r.scenario,
         'Cache Size': r.cacheSize,
         'Init Time (ms)': r.initDurationMs,
         'DB Ops/sec': r.dbOpsPerSec,
+        'DB Queries Direct': r.dbQueriesDirect,
         'Cache Ops/sec': r.cacheOpsPerSec,
+        'DB Queries Cache': r.dbQueriesCache,
         'Speedup': `${r.speedup}x`,
         'Correctness': r.correctness,
         'Heap Mem (MB)': r.cacheMemoryHeapMB,

@@ -5,3 +5,6 @@ example
 .npmrc
 .vscode
 azure-pipelines.yml
+AGENTS.md
+benchmark
+CHANGELOG.md

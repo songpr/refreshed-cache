@@ -2,120 +2,113 @@
 
 This directory contains a benchmark suite that compares the performance, memory usage, and correctness of `refreshed-cache` against direct Postgres querying using the `postgres` library.
 
-## Prerequisites
+---
+
+## 1. Prerequisites
 
 - **Node.js** (v18+)
 - **Docker** or **OrbStack**
 
-## Files
+---
 
-- `docker-compose.yml`: Spins up Postgres 17.
-- `schema.sql`: Database schema definition (`users` table).
-- `seed.js`: Database seeding script using `@faker-js/faker` to generate 1,000,000 records.
-- `run-benchmark.js`: Benchmark runner executing scenarios, measuring metrics, and checking correctness.
-- `run-long-benchmark.js`: Simulates 3 caching strategies sequentially under a shifting query load to verify memory ceiling bounding, memory stability (GC), and UX ROI.
-- `run-load-test.js`: Simulates high concurrent user load (~1,500 - 3,500 requests/sec) to compare in-process cache lookups against direct Postgres querying via optimized Prepared Statements.
+## 2. Benchmark Setup & Database Size
 
-## How to Run
+The database is populated with **10,000,000** records generated via a fast SQL generator (`generate_series`). Each row contains:
+- `id` (SERIAL PRIMARY KEY)
+- `uuid` (VARCHAR UNIQUE) - indexed
+- `name` (VARCHAR)
+- `email` (VARCHAR)
+- `metadata` (JSONB) - containing nested properties simulating user profiles
 
-### 1. Start the Database
-Spin up the Postgres container:
+### Physical DB Sizes at 10M Rows:
+* **Table Data Size (Relation Size)**: `1,850 MB` (1.85 GB)
+* **Total Table Size (Data + Indexes)**: `3,524 MB` (3.52 GB)
+* **Overall Database Size**: `3,532 MB` (3.53 GB)
+
+---
+
+## 3. Files & Architecture
+
+- `docker-compose.yml`: Spins up Postgres 17 on port `5439`.
+- `schema.sql`: Table definitions and index structures.
+- `seed.js`: Database seeding script.
+- `run-benchmark.js`: Measures standard scenario throughput (hits vs. misses) and tracks `DB Queries Triggered`.
+- `run-long-benchmark.js`: Simulates caching strategies over multiple intervals, verifying memory limits and garbage collection behavior.
+- `run-load-test.js`: Sustained concurrent user load test comparing local caching against Direct Prepared Statements (No Cache).
+- `run-new-features-benchmark.js`: Evaluates performance ROI of Single-flight Promise Coalescing and Bulk Batch Loading.
+
+---
+
+## 4. How to Run
+
+### Start the Database
 ```bash
 docker compose -f benchmark/docker-compose.yml up -d
 ```
-*(Note: Exposes Postgres on port `5439` by default).*
 
-### 2. Install Benchmark Dependencies
+### Install Dependencies
 ```bash
 npm install
 ```
 
-### 3. Seed Fake Data
-Seed the database with 1,000,000 records (generates realistic names, emails, and JSON metadata using Faker):
-```bash
-node benchmark/seed.js
-```
+### Run Benchmarks (with Optional `--rounds=N` and `--duration=S` args)
+Each script can be run with `--rounds` (default: 1) and `--duration` (for load simulations, in seconds) to gather comprehensive data.
 
-### 4. Run the Standard Benchmark
-Execute the standard query scenarios:
 ```bash
-node benchmark/run-benchmark.js
-```
+# 1. Standard Benchmark (5 rounds)
+node benchmark/run-benchmark.js --rounds=5
 
-### 5. Run the Long-Running Strategy Simulation
-Run the simulation over an extended workload (includes GC tracking and memory leaks validation):
-```bash
-node --expose-gc benchmark/run-long-benchmark.js
-```
+# 2. Strategy Simulation (5 rounds, 30s duration)
+node benchmark/run-long-benchmark.js --rounds=5 --duration=30
 
-### 6. Run the High-Concurrency Load Test
-Compare in-process cache lookups against direct prepared statement database queries under sustained load (simulates real-world traffic, defaults to 600s/10m duration):
-```bash
-node --expose-gc benchmark/run-load-test.js --duration=600
+# 3. Sustained Load Test (5 rounds, 30s duration)
+node benchmark/run-load-test.js --rounds=5 --duration=30
+
+# 4. New Features Benchmark (5 rounds, 30s duration)
+node benchmark/run-new-features-benchmark.js --rounds=5 --duration=30
 ```
 
 ---
 
-## Scenario Results (1,000,000 Total DB Rows)
+## 5. Benchmark Results (10,000,000 Total DB Rows)
 
-The benchmark simulates 50,000 read queries with a realistic traffic distribution of 70% cache hits, 25% cache misses (exist in DB), and 5% hard misses.
+### A. Standard Scenario Throughput (50,000 Lookups, 5-Rounds Run)
+Simulates 50,000 read queries with a realistic traffic distribution of 70% cache hits, 25% cache misses (exist in DB), and 5% hard misses.
 
-| Scenario | Cache Size | Cache Init Time | DB Ops/sec | Cache Ops/sec | Speedup | Correctness | Heap Memory Overhead | RSS Memory Overhead |
+*Direct Prepared Statements (No Cache) are compared directly against the Cache as a baseline.*
+
+| Scenario | Cache Size | Init Time | Avg DB Ops/sec | DB Queries Direct | Avg Cache Ops/sec | DB Queries Cache | Speedup | Correctness |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Small Cache** (1% coverage) | 10,000 | 18 ms | ~57,000 | ~111,000 | **1.95x** | ✅ PASSED | ~3.57 MB | ~13.04 MB |
-| **Medium Cache** (10% coverage) | 100,000 | 144 ms | ~50,000 | ~91,000 | **1.83x** | ✅ PASSED | ~1.79 MB | ~49.89 MB |
-| **Large Cache** (50% coverage) | 500,000 | 856 ms | ~35,500 | ~70,000 | **1.99x** | ✅ PASSED | ~164.65 MB | ~210.45 MB |
-
-### Highlights
-1. **Performance**: Query throughput is nearly doubled (**~1.8x to 2.0x faster**) when using `DataCache` compared to direct database queries, even when leveraging Postgres' native client-side query pipelining.
-2. **Memory Footprint**: Memory usage scales linearly and remains highly efficient. Pre-loading 500,000 rows containing nested JSON metadata objects consumes only about ~165 MB of heap memory.
-3. **Correctness**: Every query matches the source database's results exactly.
+| **Small Cache** (1% coverage) | 10,000 | ~20 ms | ~17,600 | 50,000 | ~48,600 | 20,800 | **2.76x** | ✅ PASSED |
+| **Medium Cache** (10% coverage) | 100,000 | ~130 ms | ~15,600 | 50,000 | ~42,800 | 16,200 | **2.74x** | ✅ PASSED |
+| **Large Cache** (50% coverage) | 500,000 | ~580 ms | ~15,100 | 50,000 | ~37,600 | 15,300 | **2.49x** | ✅ PASSED |
 
 ---
 
-## Long-Running Strategy Simulation & Memory Protection (max: 10,000)
+### B. Long-Running Caching Strategies (5 Rounds, max: 100,000)
+Evaluates strategies under a shifting hot key load (sliding window) using a strict limit of `max: 100000` keys to test process RAM safety and GC leaks:
 
-Evaluates three caching strategies under a shifting hot key load (sliding window) using a strict limit of `max: 10000` keys to test process RAM safety and GC leaks:
+- **Direct Prepared Statements (No Cache)**: Database queries match the exact traffic volume (high database load).
+- **Strategy A (Scheduled Full Refresh)**: Periodically pulls the first 100,000 items, triggering significant DB traffic during sync.
+- **Strategy B (Lazy Fetch-on-Miss)**: Populates the cache dynamically on misses.
+- **Strategy C (Active-Only Refresh)**: Keeps active items fresh by passing recent keys to the fetcher, reducing database lookups to only the active working set.
 
-| Strategy | Hit Rate | Base Heap | Peak Heap | Memory Growth | After Close Heap |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Strategy A: Scheduled Full Refresh** | 95.0% | 5.37 MB | 17.50 MB | +12.13 MB | 13.06 MB |
-| **Strategy B: Lazy Fetch-on-Miss** | 95.0% | 9.88 MB | 21.58 MB | +11.70 MB | 17.20 MB |
-| **Strategy C: Active-Only Refresh** | 95.0% | 14.08 MB | 26.77 MB | +12.69 MB | 22.49 MB |
-
-### Key Takeaways
-- **Memory Ceiling Bound**: Despite querying hundreds of thousands of keys, the cache size never exceeded `10,000` items, keeping the memory overhead completely flat and bounded. This protects the application from OOM.
-- **Resource Recovery**: After closing the cache (`await cache.close()`), memory was reclaimed by V8, verifying no timer/handle leaks.
+**Key Observation**: `Strategy C` achieves the same **95% hit rate** as Strategy A/B, but reduces database query traffic by **over 90x** (from 50,000+ lookups to under 601), keeping memory flat and growth minimal (~4 MB).
 
 ---
 
-## High-Concurrency Load Test (Cache vs. Prepared Statements)
+### C. Sustained High-Concurrency Load Test (Cache vs. Prepared Statements)
+Under sustained high-concurrency concurrent traffic, direct database queries suffer from connection pooling and queueing delays, causing tail latencies to spike. 
 
-Compares in-process cache lookups against direct Postgres querying via optimized Prepared Statements under sustained concurrent traffic:
-
-| Strategy | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | Hit Rate | Peak Heap | Heap Growth | Correctness |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Direct Prepared Statements (No Cache)** | 2,261 rps | 17.72 ms | 214.30 ms | 222.02 ms | 95.0% | 20.71 MB | +14.78 MB | ✅ PASSED |
-| **Lazy Fetch-on-Miss (max: 10000)** | 3,288 rps | 3.71 ms | 17.40 ms | 206.56 ms | 94.9% | 32.48 MB | +19.38 MB | ✅ PASSED |
-| **Active-Only Refresh Cache (max: 10000)** | 3,338 rps | 3.82 ms | 19.26 ms | 208.84 ms | 95.0% | 39.68 MB | +19.23 MB | ✅ PASSED |
-
-### Critical Insights
-- **UX & Latency**: Cache yields a **11x speedup in p95 latency** under high concurrency compared to direct prepared statements due to avoiding database thread and connection pool queuing.
-- **Throughput**: Cache increases throughput by **~50%** on the same compute resources.
+- **Prepared Statement Baseline**: Latencies (p95/p99) consistently exceed **200 ms - 250 ms** under heavy traffic.
+- **In-Process Cache**: Bypasses connection queuing completely, resolving p50 latencies in under **10 ms** and keeping heap memory bounded and garbage collected successfully.
 
 ---
 
-## AWS Infrastructure Cost ROI Analysis (10M / 100M Scale)
+### D. New Features Performance ROI (Promise Coalescing & Bulk Batching)
+By preventing the thundering herd problem (coalescing duplicate read requests) and bulk fetching missed keys:
 
-### 1. In-Process Cache (Active-Only or Lazy Cache)
-- **Infrastructure Cost**: **$0** / month.
-- **Memory Bounded**: Bounding the cache size to `10,000` keys limits the footprint to ~5MB. Even at 100M database rows, this active working set protects against memory exhaustion.
-- **Latency**: **< 0.1ms** (local memory lookup, zero serialization or network roundtrip).
-
-### 2. External Redis (ElastiCache)
-- **Infrastructure Cost**:
-  - **10 Million Rows** (~5GB database): Requires a `cache.r6g.large` (13GB, **~$110/month**).
-  - **100 Million Rows** (~50GB database): Requires a `cache.r6g.2xlarge` (52GB, **~$440/month**).
-- **Latency**: **+1.5ms to 3ms** (network hop, TCP connection, data serialization/deserialization CPU overhead).
-
-**Conclusion**: For most production workloads, running an in-process active-only refresh cache with a strict `max` limit yields massive cost savings and superior performance.
+1. **Throughput**: Throughput scales from **~6,000 rps** (old caching architecture) to **~24,500 rps** (new caching architecture with coalescing and batching).
+2. **Tail Latency (p99)**: drops from **~260 ms** to **~25 ms**.
+3. **Database Protection**: Reduces total database queries triggered by nearly **2x**.
+4. **Correctness**: Verified 100% data consistency against Postgres post-load.

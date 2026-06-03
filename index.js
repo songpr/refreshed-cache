@@ -54,7 +54,7 @@ class DataCache {
         }
         const passRecentKeysOnRefresh = options.passRecentKeysOnRefresh === undefined ? false : options.passRecentKeysOnRefresh;
         if (typeof (passRecentKeysOnRefresh) !== "boolean") throw new Error("Invalid passRecentKeysOnRefresh");
-        const max = options.max || 10000;
+        const max = options.max === undefined ? 10000 : options.max;
         if (!Number.isInteger(max)) throw new Error("Invalid max");
         Object.defineProperty(this, "passRecentKeysOnRefresh", { get: () => passRecentKeysOnRefresh, configurable: false, enumerable: true });
         Object.defineProperty(this, "maxAge", { get: () => maxAge, configurable: false, enumerable: true });
@@ -159,6 +159,25 @@ class DataCache {
             Object.defineProperty(this, "maxMiss", { get: () => maxMiss, configurable: false, enumerable: true });
             Object.defineProperty(this, "maxAgeMiss", { get: () => maxAgeMiss, configurable: false, enumerable: true });
         }
+
+        const fetchByKeys = options.fetchByKeys;
+        if (typeof (fetchByKeys) === "function") {
+            Object.defineProperty(this, "_fetchByKeys", { value: fetchByKeys, configurable: false, enumerable: false, writable: false });
+            const _isAsyncFetchByKeys = util.types.isAsyncFunction(fetchByKeys);
+            Object.defineProperty(this, "_isAsyncFetchByKeys", { get: () => _isAsyncFetchByKeys, configurable: false, enumerable: false });
+            if (this._missCache === undefined) {
+                const maxMiss = options.maxMiss || 2000;
+                if (!Number.isInteger(maxMiss)) throw new Error("Invalid maxMiss");
+                const maxAgeMiss = options.maxAgeMiss || refreshAge;
+                if (!Number.isInteger(maxAgeMiss)) throw new Error("Invalid maxAgeMiss");
+                const _missLRUCache = new LRUCache({ max: maxMiss, ttl: maxAgeMiss * 1000 })
+                Object.defineProperty(this, "_missCache", { get: () => _missLRUCache, configurable: false, enumerable: false });
+                Object.defineProperty(this, "maxMiss", { get: () => maxMiss, configurable: false, enumerable: true });
+                Object.defineProperty(this, "maxAgeMiss", { get: () => maxAgeMiss, configurable: false, enumerable: true });
+            }
+        }
+
+        Object.defineProperty(this, "_pendingFetches", { value: new Map(), configurable: false, enumerable: false });
     }
 
     async init() {
@@ -281,20 +300,97 @@ class DataCache {
      */
     async getOrFetch(key) {
         const value = this._cache.get(key);
-        //miss cache
         if (value !== undefined) return value;
+
         if (this._fetchByKey !== undefined) {
-            //check miss cache key,if it have been try to fetch already or not.
-            //To prevent it to repeatly fetch on really miss cache key, until the missd key cache is expired
-            if (this._missCache.peek(key) !== undefined) return undefined; //peek will not update recentness of this missed key so allow it to expired.
-            const newValue = this._isAsyncFetchByKey ? await this._fetchByKey(key) : this._fetchByKey(key);
-            if (newValue !== undefined) {
-                this._cache.set(key, newValue)
-            } else {
-                this._missCache.set(key, true);
-            };
-            return newValue;
+            // check miss cache key, if it has been fetched already or not.
+            if (this._missCache.peek(key) !== undefined) return undefined;
+
+            // Promise Coalescing (Single-flight): merge duplicate requests into one promise
+            if (this._pendingFetches.has(key)) {
+                return this._pendingFetches.get(key);
+            }
+
+            const fetchPromise = Promise.resolve().then(async () => {
+                try {
+                    const newValue = this._isAsyncFetchByKey ? await this._fetchByKey(key) : this._fetchByKey(key);
+                    if (newValue !== undefined) {
+                        this._cache.set(key, newValue);
+                    } else {
+                        this._missCache.set(key, true);
+                    }
+                    return newValue;
+                } finally {
+                    this._pendingFetches.delete(key);
+                }
+            });
+
+            this._pendingFetches.set(key, fetchPromise);
+            return fetchPromise;
         }
+    }
+
+    /**
+     * Get values for multiple keys. Missing keys are fetched using fetchByKeys in a batch,
+     * or individual getOrFetch calls concurrently as fallback.
+     * @param {Array} keys 
+     * @returns {Promise<Object>} An object mapping keys to values
+     */
+    async getOrFetchMany(keys) {
+        if (!Array.isArray(keys)) throw new Error("keys must be an array");
+        const result = {};
+        const missingKeys = [];
+
+        for (const key of keys) {
+            const val = this._cache.get(key);
+            if (val !== undefined) {
+                result[key] = val;
+            } else {
+                missingKeys.push(key);
+            }
+        }
+
+        if (missingKeys.length > 0) {
+            if (this._fetchByKeys !== undefined) {
+                // Filter out keys already in the miss cache
+                const actualMissing = missingKeys.filter(k => this._missCache.peek(k) === undefined);
+                if (actualMissing.length > 0) {
+                    const fetchedData = this._isAsyncFetchByKeys ? await this._fetchByKeys(actualMissing) : this._fetchByKeys(actualMissing);
+                    if (fetchedData) {
+                        for await (const [k, v] of fetchedData) {
+                            if (v !== undefined) {
+                                this._cache.set(k, v);
+                                if (keys.includes(k)) {
+                                    result[k] = v;
+                                }
+                            } else {
+                                this._missCache.set(k, true);
+                            }
+                        }
+                    }
+                    // Mark any keys as misses if the batch fetcher did not return them
+                    for (const k of actualMissing) {
+                        if (result[k] === undefined) {
+                            this._missCache.set(k, true);
+                        }
+                    }
+                }
+            } else {
+                // Fallback to calling getOrFetch for each key concurrently (leverages single-flight)
+                const promises = missingKeys.map(async (key) => {
+                    const val = await this.getOrFetch(key);
+                    return [key, val];
+                });
+                const resolved = await Promise.all(promises);
+                for (const [k, v] of resolved) {
+                    if (v !== undefined) {
+                        result[k] = v;
+                    }
+                }
+            }
+        }
+
+        return result;
     }
 
     /**

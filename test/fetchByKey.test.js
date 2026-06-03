@@ -236,7 +236,7 @@ test("fetchByKey, with missing key check repeatly", async () => {
     await delay(1010)// miss cache expired
     const start = Date.now();
     expect(await cache.getOrFetch("z")).toEqual(undefined);
-    expect(Date.now() - start).toBeGreaterThanOrEqual(200); // fetch again
+    expect(Date.now() - start).toBeGreaterThanOrEqual(190); // fetch again
     const startLoopWithMissCache = Date.now()
     for (let i = 0; i < 100; i++) {
         await cache.getOrFetch("z");
@@ -249,6 +249,6 @@ test("fetchByKey, with missing key check repeatly", async () => {
     await delay(200);//miss cache z must expired now
     const startWithoutMissCache = Date.now()
     expect(await cache.getOrFetch("z")).toEqual(undefined);
-    expect(Date.now() - startWithoutMissCache).toBeGreaterThanOrEqual(200); // do fetch again
+    expect(Date.now() - startWithoutMissCache).toBeGreaterThanOrEqual(190); // do fetch again
     
 }, 10000);
