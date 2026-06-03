@@ -1,7 +1,7 @@
 {
   "name": "refreshed-cache",
   "description": "caching data with LRU Cache and refresh it within specified time",
-  "version": "1.7.1",
+  "version": "1.8.0",
   "main": "index.js",
   "scripts": {
     "test": "jest",
