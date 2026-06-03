@@ -5,6 +5,23 @@ caching data with LRU Cache and refresh it within specified time.
 Data cache that include how to fetch/replace/clear items in one place to make it simple to use.
 
 APIs have been kept to be minimal, unless there are useful use cases.
+
+## Why refreshed-cache instead of raw lru-cache?
+
+`lru-cache`'s `fetchMethod` + `allowStale` is **pull-based**: an entry is only refreshed when *a request happens to hit it* after it goes stale. The *first* requester after expiry still pays the backend latency (stale-while-revalidate serves them stale data, not fresh). Refresh work is coupled to, and triggered by, request traffic.
+
+`refreshed-cache` is **push-based**: `asyncRefresh()` re-fetches the entire working set on a timer (`refreshAge`) or at a wall-clock time (`refreshAt`), *independent of request traffic*. Consequences that raw `lru-cache` cannot replicate without you building it:
+
+1. **Zero cache-miss penalty on hot data.** The working set is already fresh before requests arrive — reads stay `<0.1 ms` with no per-key revalidation stall.
+2. **Bounded, predictable backend load.** With `passRecentKeysOnRefresh` + "active-only" refresh, the entire hot set is refreshed in a handful of queries per interval (e.g. ~601 queries vs. ~51,000 for lazy), regardless of read QPS. Backend load is a function of *cache size and interval*, not *traffic*.
+3. **Time-aligned freshness.** `refreshAt: {days, at}` supports "rebuild the cache at 02:00 daily" — a first-class need for reference data, pricing tables, feature flags, config — that `lru-cache` has no concept of.
+4. **Encapsulated data provider.** Fetch logic (`fetch`, `fetchByKey`, `fetchByKeys`) lives with the cache config, not scattered across call sites.
+
+### Position
+> **`refreshed-cache` is for read-heavy workloads over a bounded, slowly-changing dataset (reference/config/catalog data) where you want the hot set kept fresh *proactively on a schedule* — so no request ever pays refresh latency — rather than lazily revalidated on access like raw `lru-cache`.**
+
+If a use case doesn't match that description, the honest recommendation is raw `lru-cache` (`fetchMethod` + `allowStale`).
+
 ## Installation:
 
 ```javascript
@@ -295,7 +312,9 @@ To clean up deprecated, duplicate, and sub-optimal methods in the cache API, ver
 
 ## Effective Production Usage Patterns (v1.8.0 Features)
 
-Version `1.8.0` introduces core architectural upgrades to handle high-concurrency enterprise workloads. By combining Single-flight Promise Coalescing, Bulk Batching, and memory-optimized synchronous fast-paths, the library provides a robust solution for large-scale Node.js applications.
+While caching strategies (like Promise Coalescing and Batching) are not unique to `refreshed-cache` and exist in other tools (e.g. `lru-cache`'s native `.fetch()` API, or `dataloader`), version `1.8.0` wraps them natively within its scheduled refresh and miss-cache structures to make them easy to use.
+
+These patterns demonstrate how to configure and utilize these features effectively:
 
 ### Pattern A: Thundering Herd Protection (Promise Coalescing)
 If your app experiences spikes of duplicate requests targeting the same hot keys (e.g., flash sales, breaking news), configuring `fetchByKey` automatically coalesces concurrent misses into a single database query.

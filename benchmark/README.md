@@ -214,9 +214,42 @@ An analysis of the **Base Heap Memory** across consecutive benchmark rounds show
 
 ---
 
+## 8. ⚠️ Methodology Audit & Known Validity Issues
+
+**Read this before citing any number above.** The current harness has structural flaws that make several results non-comparable. The rationalizations in §6–§7 are partly explanations of *measurement artifacts*, not properties of the library. Fix these before publishing the numbers anywhere public.
+
+### Issue 1 — All rounds share one process, one heap, one connection pool (root cause)
+Every script runs `for (let r = 1; r <= rounds; r++)` inside a **single Node process** with **one shared `postgres()` pool** (`run-benchmark.js:199`, `run-new-features-benchmark.js:320`). Consequences:
+
+- **Round-over-round throughput decay is an artifact, not data.** In §5.A the *same* workload drops 25,419 → 8,339 ops/sec across rounds. A library doesn't get 3× slower at rest; this is JIT deopt, GC pressure, and pool/heap state accumulating in one long-lived process.
+- **"Base heap warm-up" (§7) is an artifact of process sharing.** The 6 MB → 46 MB step-up is real, but it only looks like a clean "warm-up then flat" story *because every round reuses the same pool*. It says nothing about the library.
+- **Negative memory deltas** (`-317.11 MB`, `-62.75 MB` in §5.A R2; many in §5.B) are GC firing mid-measurement. A delta that's negative means the baseline was captured at a transient peak — the measurement window is wrong.
+
+**Fix:** isolate each `(strategy, round)` in its own child process (`child_process.fork`), each with a fresh pool, emitting one JSON result. Aggregate externally. One strategy per process is the single most important change.
+
+### Issue 2 — Timing uses `Date.now()`, memory isn't quiesced
+- Throughput/latency use `Date.now()` (millisecond, wall-clock) instead of `performance.now()` / `process.hrtime.bigint()`. At `<0.1 ms` latencies this is below measurement resolution — the sub-millisecond p50/p95/p99 figures in §5.B are noise.
+- `global.gc()` is called once at baseline capture but the process is never quiesced (no settle delay, no repeated GC to stable). Capture memory as `min over N forced GCs` after an idle settle, not a single snapshot.
+
+### Issue 3 — The load test (§5.C) measures the pool, not the cache
+§6 already concedes this: with a 120k sliding window over a 100k cache, evictions force 56k–65k single-key fetches that saturate the `max: 100` pool, so cache latency converges to direct-DB latency. That's a **mis-designed scenario**, not a finding. Either (a) size the working set ≤ cache `max` so the cache can actually do its job, or (b) keep it as an explicit "cache thrash under-provisioned" stress case and label it as such — but stop presenting it next to favorable numbers without that framing.
+
+### Issue 4 — "Hit Rate" is mislabeled
+§6.4 admits the ~95% in `run-load-test.js` is **DB row-existence rate**, not cache hit rate. Rename the column (`Row-Exist %` vs `Cache Hit %`) everywhere, or readers will reasonably call the whole table misleading.
+
+### Issue 5 — No warm-up exclusion, no variance reporting
+Tables report single values with no min/median/stddev. Discard the first warm-up iteration explicitly and report median ± stddev (or p-values) so "3.5× faster" is defensible rather than cherry-picked from a noisy run.
+
+### What to do with the results
+- The **one trustworthy, defensible signal** is the *query-count* reduction in §5.B (≈601 vs ≈51,000 at equal ~95% hit rate). Query counts are exact integers, immune to the timing/GC noise above. **Lead the README with this; it's the real story.**
+- Treat all sub-millisecond latency and per-round throughput figures as **indicative only** until Issues 1–2 are fixed.
+- After re-running with process isolation + `hrtime` + variance, expect the dramatic round-to-round swings to disappear; that disappearance *is* the validation.
+
+---
+
 ## 8. Version 1.8.0 Release & Effective Production Usage Patterns
 
-Version `1.8.0` introduces core architectural upgrades to handle high-concurrency enterprise workloads. By combining Single-flight Promise Coalescing, Bulk Batching, and memory-optimized synchronous fast-paths, the library provides a robust solution for large-scale Node.js applications.
+While caching strategies (like Promise Coalescing and Batching) are not unique to `refreshed-cache` and exist in other tools (e.g. `lru-cache`'s native `.fetch()` API, or `dataloader`), version `1.8.0` wraps them natively within its scheduled refresh and miss-cache structures to make them easy to use.
 
 Below are the key patterns to use `refreshed-cache` effectively in production:
 
