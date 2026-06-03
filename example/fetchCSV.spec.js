@@ -1,6 +1,6 @@
 //see https://alanstorm.com/async-generators-and-async-iteration-in-node-js/
 const fs = require('fs');
-const parse = require('csv-parse');
+const { parse } = require('csv-parse');
 
 async function* readCSVByLine() {
     const readFileStream = fs.createReadStream(__dirname + "/keyword.csv");
@@ -10,17 +10,17 @@ async function* readCSVByLine() {
         yield record;
     }
 }
-test("read from csv", async (done) => {
+test("read from csv", async () => {
     const csvGenerator = readCSVByLine();
     expect(Symbol.asyncIterator in Object(csvGenerator)).toBe(true);
     for await (const line of csvGenerator) {
         console.log(line)
     }
-    done();
+    
 })
 
-const delay = require("delay");
-test("fetch CSV to cache", async (done) => {
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+test("fetch CSV to cache", async () => {
     const cache = new (require("../index"))(readCSVByLine, { refreshAge: 1 });
     await cache.init();
     expect(cache.get("bo")).toEqual("bo");
@@ -33,5 +33,5 @@ test("fetch CSV to cache", async (done) => {
     expect(cache.get("hi")).toEqual('hello world');
     expect(cache.size).toEqual(13);
     await cache.close();
-    done();
+    
 }, 10000)

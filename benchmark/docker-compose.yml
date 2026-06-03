@@ -1,0 +1,16 @@
+version: '3.8'
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: refreshed-cache-benchmark-postgres
+    environment:
+      POSTGRES_USER: benchmark_user
+      POSTGRES_PASSWORD: benchmark_password
+      POSTGRES_DB: benchmark_db
+    ports:
+      - "5439:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

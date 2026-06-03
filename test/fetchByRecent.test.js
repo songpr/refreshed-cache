@@ -1,7 +1,7 @@
 const { expect } = require("@jest/globals");
-const delay = require("delay");
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-test("refreshed only by fetched key.", async (done) => {
+test("refreshed only by fetched key.", async () => {
     const data = { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 };
     const fn = (recentKeys) => {
         if (recentKeys && recentKeys.length > 0) {
@@ -22,11 +22,11 @@ test("refreshed only by fetched key.", async (done) => {
     expect(await cache.get("a")).toBe(undefined);
     expect(cache.size).toEqual(2);
     await cache.close();
-    done();
+    
 })
 
 
-test("refreshed only by fetched key, only non expired cached are in next fetch", async (done) => {
+test("refreshed only by fetched key, only non expired cached are in next fetch", async () => {
     const data = { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 };
     const fn = (recentKeys) => {
         if (recentKeys && recentKeys.length > 0) {
@@ -50,10 +50,10 @@ test("refreshed only by fetched key, only non expired cached are in next fetch",
     expect(await cache.get("a")).toBe(1);
     expect(cache.size).toEqual(1);
     await cache.close();
-    done();
+    
 })
 
-test("refreshed only by fetched key, only non expired cached and exists", async (done) => {
+test("refreshed only by fetched key, only non expired cached and exists", async () => {
     const data = { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 };
     const fn = (recentKeys) => {
         console.log(recentKeys)
@@ -86,5 +86,5 @@ test("refreshed only by fetched key, only non expired cached and exists", async 
     expect(await cache.get("a")).toBe(1);
     expect(await cache.get("c")).toBe(undefined);
     await cache.close();
-    done();
+    
 })

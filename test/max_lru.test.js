@@ -1,8 +1,8 @@
 //testing max and lru when having max
 const { expect } = require("@jest/globals");
-const delay = require("delay");
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-test("fetch exceed max, keep first max entries - make sure the most important entry is the first one", async (done) => {
+test("fetch exceed max, keep first max entries - make sure the most important entry is the first one", async () => {
     const max = 3;
     const fn = () => Object.entries({ a: 1, b: 2, c: 3, d: 4 });
     const cache = new (require("../index"))(fn, { max: max });
@@ -13,10 +13,10 @@ test("fetch exceed max, keep first max entries - make sure the most important en
     expect(cache.get("c")).toEqual(3);
     expect(cache.get("d")).toBe(undefined);;
     expect(cache.get("ee")).toBe(undefined);;
-    done();
+    
 })
 
-test("fetch exceed max, keep first max entries - the least recently get/set will be removed first", async (done) => {
+test("fetch exceed max, keep first max entries - the least recently get/set will be removed first", async () => {
     const max = 3;
     const fn = () => Object.entries({ a: 1, b: 2, c: 3, d: 4 });
     const cache = new (require("../index"))(fn, { max: max });
@@ -31,11 +31,11 @@ test("fetch exceed max, keep first max entries - the least recently get/set will
     expect(cache.get("e")).toBe(undefined); //just get b,c so e is least recently use
     expect(cache.get("d")).toBe(undefined);
     expect(cache.get("ee")).toBe(undefined);
-    done();
+    
 })
 
 const ntest = () => { };
-test("fetch exceed max, refresh cache every 1 sec", async (done) => {
+test("fetch exceed max, refresh cache every 1 sec", async () => {
     const max = 3;
     let round = 1;
     const fn = () => {
@@ -62,10 +62,10 @@ test("fetch exceed max, refresh cache every 1 sec", async (done) => {
     }
     console.log("test fetch close")
     await cache.close();
-    done();
+    
 })
 
-test("fetch exceed max, maxAge expired, maxAge < refreshAge", async (done) => {
+test("fetch exceed max, maxAge expired, maxAge < refreshAge", async () => {
     const max = 3;
     let round = 1;
     const fn = () => {
@@ -96,10 +96,10 @@ test("fetch exceed max, maxAge expired, maxAge < refreshAge", async (done) => {
     expect(cache.get("c")).toEqual(6);
     expect(cache.get("d")).toBe(undefined);;
     await cache.close();
-    done();
+    
 })
 
-test("fetch exceed max ,maxAge expired, maxAge > refreshAge, resetOnRefresh=true", async (done) => {
+test("fetch exceed max ,maxAge expired, maxAge > refreshAge, resetOnRefresh=true", async () => {
     const max = 3;
     let round = 1;
     const fn = () => {
@@ -139,10 +139,10 @@ test("fetch exceed max ,maxAge expired, maxAge > refreshAge, resetOnRefresh=true
     expect(cache.get("c_3")).toEqual(9);
     expect(cache.get("d_3")).toBe(undefined);;
     await cache.close();
-    done();
+    
 })
 //new fetch more important than old items
-test("fetch size < max ,maxAge expired, maxAge > refreshAge, resetOnRefresh=true", async (done) => {
+test("fetch size < max ,maxAge expired, maxAge > refreshAge, resetOnRefresh=true", async () => {
     const max = 6;
     let round = 1;
     const fn = () => {
@@ -184,11 +184,11 @@ test("fetch size < max ,maxAge expired, maxAge > refreshAge, resetOnRefresh=true
     expect(cache.get("c_3")).toEqual(9);
     expect(cache.get("d_3")).toEqual(12);
     await cache.close();
-    done();
+    
 })
 //if max > size of new fetch, here are priority of cache -> new fetch > old fetch priority recently use > old fetch with no used > expired items.
 
-test("fetch size < max, maxAge expired, maxAge > refreshAge, resetOnRefresh = false", async (done) => {
+test("fetch size < max, maxAge expired, maxAge > refreshAge, resetOnRefresh = false", async () => {
     const max = 10;
     let round = 1;
     const fn = () => {
@@ -258,5 +258,5 @@ test("fetch size < max, maxAge expired, maxAge > refreshAge, resetOnRefresh = fa
     expect(cache.get("d_3")).toBe(undefined);;
 
     await cache.close();
-    done();
+    
 });

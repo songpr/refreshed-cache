@@ -1,7 +1,7 @@
 const { expect } = require("@jest/globals");
-const delay = require("delay");
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-test("set, set null, del empty", async (done) => {
+test("set, set null, del empty", async () => {
     const fn = () => Object.entries({});
     const cache = new (require("../index"))(fn);
     await cache.init();
@@ -14,7 +14,7 @@ test("set, set null, del empty", async (done) => {
     cache.set("ee", "eeeee");
     expect(cache.get("ee")).toEqual("eeeee");
     expect(cache.size).toEqual(2);
-    cache.del("ee");
+    cache.delete("ee");
     expect(cache.get("ee")).toBe(undefined);
     expect(cache.size).toEqual(1);
     cache.set("null", null);
@@ -22,9 +22,9 @@ test("set, set null, del empty", async (done) => {
     expect(cache.get("null")).not.toBe(undefined);
     expect(cache.size).toEqual(2);
     await cache.close();
-    done();
+    
 })
-test("fetch only", async (done) => {
+test("fetch only", async () => {
     const fn = () => Object.entries({ a: 1, b: 2, c: 3 });
     const cache = new (require("../index"))(fn);
     await cache.init();
@@ -37,14 +37,14 @@ test("fetch only", async (done) => {
     cache.set("ee", "eeeee");
     expect(cache.get("ee")).toEqual("eeeee");
     expect(cache.size).toEqual(4);
-    cache.del("ee");
+    cache.delete("ee");
     expect(cache.get("ee")).toBe(undefined);
     expect(cache.size).toEqual(3);
     await cache.close();
-    done();
+    
 })
 
-test("fetch refresh cache every 1 sec", async (done) => {
+test("fetch refresh cache every 1 sec", async () => {
     let round = 1;
     const fn = () => {
         console.log("test fetch", round)
@@ -66,17 +66,17 @@ test("fetch refresh cache every 1 sec", async (done) => {
         cache.set("ee", 4 * i);
         expect(cache.get("ee")).toEqual(4 * i);
         expect(cache.size).toEqual(4);
-        cache.del("ee");
+        cache.delete("ee");
         expect(cache.get("ee")).toBe(undefined);
         expect(cache.size).toEqual(3);
         await delay(1200);
     }
     console.log("test fetch close")
     await cache.close();
-    done();
+    
 })
 
-test("maxAge expired, maxAge < refreshAge", async (done) => {
+test("maxAge expired, maxAge < refreshAge", async () => {
     let round = 1;
     const fn = () => {
         const entires = Object.entries({ a: 1 * round, b: 2 * round, c: 3 * round })
@@ -94,7 +94,7 @@ test("maxAge expired, maxAge < refreshAge", async (done) => {
     cache.set("ee", "eeee");
     expect(cache.get("ee")).toEqual("eeee");
     expect(cache.size).toEqual(4);
-    cache.del("ee");
+    cache.delete("ee");
     expect(cache.get("ee")).toBe(undefined);
     expect(cache.size).toEqual(3);
     cache.set("null", null);
@@ -121,14 +121,14 @@ test("maxAge expired, maxAge < refreshAge", async (done) => {
     cache.set("ff", "ffff");
     expect(cache.get("ff")).toEqual("ffff");
     expect(cache.size).toEqual(4);
-    cache.del("ff");
+    cache.delete("ff");
     expect(cache.get("ff")).toBe(undefined);
     expect(cache.size).toEqual(3);
     await cache.close();
-    done();
+    
 })
 
-test("maxAge expired, maxAge > refreshAge, resetOnRefresh=true", async (done) => {
+test("maxAge expired, maxAge > refreshAge, resetOnRefresh=true", async () => {
     let round = 1;
     const fn = () => {
         const obj = {};
@@ -150,7 +150,7 @@ test("maxAge expired, maxAge > refreshAge, resetOnRefresh=true", async (done) =>
     cache.set("ee", "eeee");
     expect(cache.get("ee")).toEqual("eeee");
     expect(cache.size).toEqual(4);
-    cache.del("ee");
+    cache.delete("ee");
     expect(cache.get("ee")).toBe(undefined);
     expect(cache.size).toEqual(3);
     await delay(1200);
@@ -164,10 +164,10 @@ test("maxAge expired, maxAge > refreshAge, resetOnRefresh=true", async (done) =>
     expect(cache.get("b_2")).toEqual(4);
     expect(cache.get("c_2")).toEqual(6);
     expect(cache.size).toEqual(3);
-    cache.del("ff");
+    cache.delete("ff");
     expect(cache.get("ff")).toBe(undefined);
     expect(cache.get("c_2")).toEqual(6);
-    cache.del("c_2");
+    cache.delete("c_2");
     expect(cache.get("c_2")).toBe(undefined);
     expect(cache.size).toEqual(2); // unchange
     await delay(1200);
@@ -177,10 +177,10 @@ test("maxAge expired, maxAge > refreshAge, resetOnRefresh=true", async (done) =>
     expect(cache.get("b_3")).toEqual(6);
     expect(cache.get("c_3")).toEqual(9);
     await cache.close();
-    done();
+    
 })
 
-test("maxAge expired, maxAge > refreshAge, resetOnRefresh = false", async (done) => {
+test("maxAge expired, maxAge > refreshAge, resetOnRefresh = false", async () => {
     let round = 1;
     const fn = () => {
         const obj = {};
@@ -202,7 +202,7 @@ test("maxAge expired, maxAge > refreshAge, resetOnRefresh = false", async (done)
     cache.set("ee", "eeee");
     expect(cache.get("ee")).toEqual("eeee");
     expect(cache.size).toEqual(4);
-    cache.del("ee");
+    cache.delete("ee");
     expect(cache.get("ee")).toBe(undefined);
     expect(cache.size).toEqual(3);
     cache.set("null", null);
@@ -237,5 +237,56 @@ test("maxAge expired, maxAge > refreshAge, resetOnRefresh = false", async (done)
     expect(cache.get("b_3")).toEqual(6);
     expect(cache.get("c_3")).toEqual(9);
     await cache.close();
-    done();
-})
+    
+});
+
+test("delete and clear with missCache active", async () => {
+    const data = { a: 1, b: 2 };
+    const fetch = () => Object.entries(data);
+    const cache = new (require("../index"))(fetch, {
+        max: 3,
+        fetchByKey: (key) => data[key],
+        maxMiss: 10
+    });
+    await cache.init();
+    
+    // Query a missing key to populate _missCache
+    expect(await cache.getOrFetch("z")).toBe(undefined);
+    expect(cache._missCache.has("z")).toBe(true);
+    
+    // Delete z from missCache and cache to verify coverage
+    cache.delete("z");
+    expect(cache._missCache.has("z")).toBe(false);
+    
+    // Populate z again
+    expect(await cache.getOrFetch("z")).toBe(undefined);
+    expect(cache._missCache.has("z")).toBe(true);
+    
+    // Clear everything
+    cache.clear();
+    expect(cache._missCache.has("z")).toBe(false);
+    expect(cache.get("a")).toBe(undefined);
+    
+    await cache.close();
+});
+
+test("timeoutLoop error catch when cache is closed", async () => {
+    let round = 1;
+    const fn = async () => {
+        if (round === 2) {
+            await delay(100);
+            throw new Error("error during refresh");
+        }
+        round++;
+        return Object.entries({ a: 1 });
+    };
+    const cache = new (require("../index"))(fn, { maxAge: 1, refreshAge: 1 });
+    await cache.init();
+    
+    // Wait slightly after 1s (refresh round 2 starts)
+    await delay(1050);
+    // Now the refresh is running (delay 100ms). Let's close the cache immediately.
+    await cache.close();
+    // Wait for the refresh promise to throw error
+    await delay(200);
+});

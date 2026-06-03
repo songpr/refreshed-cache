@@ -1,7 +1,7 @@
 const { expect } = require("@jest/globals");
-const delay = require("delay");
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-test("fetchByKey", async (done) => {
+test("fetchByKey", async () => {
     const data = { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 };
     const fetch = () => Object.entries(data);
     const cache = new (require("../index"))(fetch, { max: 3, fetchByKey: (key) => data[key] });
@@ -29,10 +29,10 @@ test("fetchByKey", async (done) => {
     expect(cache.get("e")).toEqual(5);
     expect(cache.size).toEqual(3);
     await cache.close();
-    done();
+    
 })
 
-test("fetch refresh cache every 1 sec", async (done) => {
+test("fetch refresh cache every 1 sec", async () => {
     let round = 1;
     const fetch = () => {
         console.log("test fetch", round)
@@ -61,10 +61,10 @@ test("fetch refresh cache every 1 sec", async (done) => {
         await delay(1100);
     }
     await cache.close();
-    done();
+    
 })
 
-test("maxAge expired, maxAge < refreshAge", async (done) => {
+test("maxAge expired, maxAge < refreshAge", async () => {
     let round = 1;
     const fetch = () => {
         const entires = Object.entries({ a: 1 * round, b: 2 * round, c: 3 * round, d: 4 * round, e: 5 * round, f: 6 * round })
@@ -99,10 +99,10 @@ test("maxAge expired, maxAge < refreshAge", async (done) => {
     expect(cache.get("e")).toEqual(10);
     expect(cache.size).toEqual(6);
     await cache.close();
-    done();
+    
 })
 
-test("maxAge expired, maxAge > refreshAge, resetOnRefresh = false", async (done) => {
+test("maxAge expired, maxAge > refreshAge, resetOnRefresh = false", async () => {
     let round = 1;
     const fetch = () => {
         const obj = {};
@@ -155,10 +155,10 @@ test("maxAge expired, maxAge > refreshAge, resetOnRefresh = false", async (done)
     expect(await cache.getOrFetch("b_4")).toEqual(8);
     expect(cache.size).toEqual(7);
     await cache.close();
-    done();
+    
 })
 
-test("fetchByKey, with missing key", async (done) => {
+test("fetchByKey, with missing key", async () => {
     const data = { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 };
     const fetch = () => Object.entries(data);
     const cache = new (require("../index"))(fetch, {
@@ -210,10 +210,10 @@ test("fetchByKey, with missing key", async (done) => {
     expect(cache._missCache.size).toEqual(0);//miss cache is expired
     //refresh now - also miss key z is now
     await cache.close();
-    done();
+    
 }, 10000);
 
-test("fetchByKey, with missing key check repeatly", async (done) => {
+test("fetchByKey, with missing key check repeatly", async () => {
     const data = { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 };
     const fetch = () => Object.entries(data);
     const cache = new (require("../index"))(fetch, {
@@ -250,5 +250,5 @@ test("fetchByKey, with missing key check repeatly", async (done) => {
     const startWithoutMissCache = Date.now()
     expect(await cache.getOrFetch("z")).toEqual(undefined);
     expect(Date.now() - startWithoutMissCache).toBeGreaterThanOrEqual(200); // do fetch again
-    done();
+    
 }, 10000);

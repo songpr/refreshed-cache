@@ -1,7 +1,7 @@
 const { expect } = require("@jest/globals");
-const delay = require("delay");
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-test("fetch empty", async (done) => {
+test("fetch empty", async () => {
     const fn = () => Object.entries({});
     const cache = new (require("../index"))(fn);
     await cache.init();
@@ -9,9 +9,9 @@ test("fetch empty", async (done) => {
     expect(cache.get("ee")).toEqual(undefined);
     expect(cache.size).toEqual(0);
     await cache.close();
-    done();
+    
 })
-test("fetch only", async (done) => {
+test("fetch only", async () => {
     const fn = () => Object.entries({ a: 1, b: 2, c: 3 });
     const cache = new (require("../index"))(fn);
     await cache.init();
@@ -22,10 +22,10 @@ test("fetch only", async (done) => {
     expect(cache.get("ee")).toEqual(undefined);
     expect(cache.size).toEqual(3);
     await cache.close();
-    done();
+    
 })
 
-test("fetch refresh cache every 1 sec", async (done) => {
+test("fetch refresh cache every 1 sec", async () => {
     let round = 1;
     const fn = () => {
         console.log("test fetch", round)
@@ -48,10 +48,10 @@ test("fetch refresh cache every 1 sec", async (done) => {
     }
     console.log("test fetch close")
     await cache.close();
-    done();
+    
 })
 
-test("maxAge expired, maxAge < refreshAge", async (done) => {
+test("maxAge expired, maxAge < refreshAge", async () => {
     let round = 1;
     const fn = () => {
         const entires = Object.entries({ a: 1 * round, b: 2 * round, c: 3 * round })
@@ -79,10 +79,10 @@ test("maxAge expired, maxAge < refreshAge", async (done) => {
     expect(cache.get("b")).toEqual(4);
     expect(cache.get("c")).toEqual(6);
     await cache.close();
-    done();
+    
 })
 
-test("maxAge expired, maxAge > refreshAge, resetOnRefresh=true", async (done) => {
+test("maxAge expired, maxAge > refreshAge, resetOnRefresh=true", async () => {
     let round = 1;
     const fn = () => {
         const obj = {};
@@ -119,10 +119,10 @@ test("maxAge expired, maxAge > refreshAge, resetOnRefresh=true", async (done) =>
     expect(cache.get("b_3")).toEqual(6);
     expect(cache.get("c_3")).toEqual(9);
     await cache.close();
-    done();
+    
 })
 
-test("maxAge expired, maxAge > refreshAge, resetOnRefresh = false", async (done) => {
+test("maxAge expired, maxAge > refreshAge, resetOnRefresh = false", async () => {
     let round = 1;
     const fn = () => {
         const obj = {};
@@ -163,5 +163,5 @@ test("maxAge expired, maxAge > refreshAge, resetOnRefresh = false", async (done)
     expect(cache.get("b_3")).toEqual(6);
     expect(cache.get("c_3")).toEqual(9);
     await cache.close();
-    done();
+    
 })

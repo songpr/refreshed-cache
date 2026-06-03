@@ -7,7 +7,7 @@ const myAsyncIterable = {
     }
 };
 
-test("async iterable", async (done) => {
+test("async iterable", async () => {
     const firstRead = myAsyncIterable[Symbol.asyncIterator]();
     console.log(firstRead)
     const item = await firstRead.next();
@@ -19,10 +19,10 @@ test("async iterable", async (done) => {
         //    "async"
         //    "iteration!"
     }
-    done()
+    
 })
 
-test("iterator next", async (done) => {
+test("iterator next", async () => {
     const fn = () => Object.entries({ a: 1, b: 2, c: 3 });
     const gen = fn();
     nextIterator = gen[Symbol.iterator]();
@@ -31,5 +31,5 @@ test("iterator next", async (done) => {
     for await (const x of nextIterator) {
         console.log(x);
     }
-    done();
+    
 })

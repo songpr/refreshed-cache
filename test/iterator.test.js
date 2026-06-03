@@ -1,7 +1,7 @@
 const { expect } = require("@jest/globals");
-const delay = require("delay");
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-test("test iterator", async (done) => {
+test("test iterator", async () => {
     const fn = () => Object.entries({ a: 1, b: 2, c: 3 });
     const cache = new (require("../index"))(fn);
     await cache.init();
@@ -11,10 +11,10 @@ test("test iterator", async (done) => {
     expect(cache.get("d")).toEqual(undefined);
     expect(cache.get("ee")).toEqual(undefined);
     expect(cache.size).toEqual(3);
-    done();
+    
 })
 
-test("test with generator", async (done) => {
+test("test with generator", async () => {
     let round = 1;
     const fn = function* () {
         yield ["a", 1 * round];
@@ -37,11 +37,11 @@ test("test with generator", async (done) => {
     }
     console.log("test fetch close")
     await cache.close();
-    done();
+    
 })
 
 const fs = require('fs');
-const parse = require('csv-parse');
+const { parse } = require('csv-parse');
 
 async function* readCSVByLine() {
     const readFileStream = fs.createReadStream(__dirname + "/iterator.csv");
@@ -52,7 +52,7 @@ async function* readCSVByLine() {
     }
 }
 
-test("test with async generator, CSV stream to cache", async (done) => {
+test("test with async generator, CSV stream to cache", async () => {
     const cache = new (require("../index"))(readCSVByLine, { refreshAge: 1 });
     await cache.init();
     expect(cache.get("bo")).toEqual("bo");
@@ -65,7 +65,7 @@ test("test with async generator, CSV stream to cache", async (done) => {
     expect(cache.get("hi")).toEqual('hello world');
     expect(cache.size).toEqual(13);
     await cache.close();
-    done();
+    
 }, 5000)
 
 async function* readLargeCSVByLine() {
@@ -81,7 +81,7 @@ async function* readLargeCSVByLine() {
     await readFileStream.destroy();
 }
 
-test("test with large CSV file, stream first 10 items to cache", async (done) => {
+test("test with large CSV file, stream first 10 items to cache", async () => {
     const cache = new (require("../index"))(readLargeCSVByLine, { max: 10, refreshAge: 1 });
     await cache.init();
     expect(cache.get("cpPG")).toEqual("MnelEaBbPP");
@@ -96,14 +96,25 @@ test("test with large CSV file, stream first 10 items to cache", async (done) =>
     expect(cache.get("magom")).toEqual('gEMo');
     expect(cache.size).toEqual(10);
     await cache.close();
-    done();
+    
 }, 200000)
 
 //https://raw.githubusercontent.com/songpr/refreshed-cache/main/test/1000000.csv
-var got = require('got');
+const https = require('https');
+const { PassThrough } = require('stream');
+
+function getWebStream(url) {
+    const stream = new PassThrough();
+    https.get(url, (res) => {
+        res.pipe(stream);
+    }).on('error', (err) => {
+        stream.emit('error', err);
+    });
+    return stream;
+}
 
 async function* readCSV10LinesOnWeb() {
-    const csvWebStream = got.stream("https://raw.githubusercontent.com/songpr/refreshed-cache/main/test/1000000.csv");
+    const csvWebStream = getWebStream("https://raw.githubusercontent.com/songpr/refreshed-cache/main/test/1000000.csv");
     const csvParser = parse({});
     csvWebStream.pipe(csvParser)
     let i = 0;
@@ -116,7 +127,7 @@ async function* readCSV10LinesOnWeb() {
 
 }
 
-test("test read 10 rows CSV web stream to cache", async (done) => {
+test("test read 10 rows CSV web stream to cache", async () => {
     const cache = new (require("../index"))(readCSV10LinesOnWeb, { max: 10, refreshAge: 2 });
     await cache.init();
     expect(cache.get("cpPG")).toEqual("MnelEaBbPP");
@@ -131,5 +142,5 @@ test("test read 10 rows CSV web stream to cache", async (done) => {
     expect(cache.get("magom")).toEqual('gEMo');
     expect(cache.size).toEqual(10);
     await cache.close();
-    done();
+    
 }, 10000)

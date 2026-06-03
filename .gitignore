@@ -64,6 +64,8 @@ typings/
 
 # Output of 'npm pack'
 *.tgz
+junit.xml
+audit_log.txt
 
 # Yarn Integrity file
 .yarn-integrity

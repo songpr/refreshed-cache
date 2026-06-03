@@ -1,4 +1,5 @@
 const util = require('util');
+const { LRUCache } = require("lru-cache");
 const timeAtRegex = /^(2[0-3]|1[0-9]|0?[0-9]):([1-5][0-9]|0?[0-9]):([1-5][0-9]|0?[0-9])$/
 const aDayInMS = 24 * 60 * 60 * 1000;
 function nowMsFrom00_00() {
@@ -60,7 +61,7 @@ class DataCache {
         Object.defineProperty(this, "refreshAge", { get: () => refreshAge, configurable: false, enumerable: true });
         Object.defineProperty(this, "resetOnRefresh", { get: () => resetOnRefresh, configurable: false, enumerable: true });
         Object.defineProperty(this, "max", { get: () => max, configurable: false, enumerable: true });
-        const _lruCache = new (require("lru-cache"))({ max: max, ttl: maxAge * 1000 })
+        const _lruCache = new LRUCache({ max: max, ttl: maxAge * 1000 })
         Object.defineProperty(this, "_cache", { get: () => _lruCache, configurable: false, enumerable: false });
         Object.defineProperty(this, "size", { get: () => _lruCache.size, configurable: false, enumerable: true });
 
@@ -71,7 +72,10 @@ class DataCache {
         Object.defineProperty(this, "_timeoutLoop", {
             value: (asyncRefresh, time) => {
                 dataCache._runInMs = time;
-                setTimeout(function () {
+                dataCache._timeoutId = setTimeout(function () {
+                    if (dataCache.isClose === true) {
+                        return;
+                    }
                     asyncRefresh().then(() => {
                         //if pass then timeoutLoop for the next refresh
                         if (dataCache.isClose === true) {
@@ -81,11 +85,11 @@ class DataCache {
                         dataCache._timeoutLoop(asyncRefresh, time);
                     }).catch(err => {
                         try {
-                            console.error("error when refrech cache")
-                            console.error(err.stack)
                             if (dataCache.isClose === true) {
                                 return;
                             }
+                            console.error("error when refrech cache")
+                            console.error(err.stack)
                             //cache is not close then set timeout loop again
                             dataCache._timeoutLoop(asyncRefresh, time);
                         } catch (unexpectedError) {
@@ -93,7 +97,7 @@ class DataCache {
                             console.error("unexpected error in set refresh time after error")
                         }
                     });
-                }, time)
+                }, time);
             }
             , configurable: false, enumerable: false, writable: false
         });
@@ -110,7 +114,10 @@ class DataCache {
                 const daysInMsToRun = (refreshDaysInMs == 0) ? (diffTime > 0 ? 0 : aDayInMS) : refreshDaysInMs;
                 const runInMS = daysInMsToRun + diffTime;
                 dataCache._runInMs = runInMS;
-                setTimeout(function () {
+                dataCache._timeoutId = setTimeout(function () {
+                    if (dataCache.isClose === true) {
+                        return;
+                    }
                     asyncRefresh().then(() => {
                         //if pass then timeoutLoop for the next refresh
                         if (dataCache.isClose === true) {
@@ -120,11 +127,11 @@ class DataCache {
                         dataCache._refreshAtLoop(asyncRefresh, refreshAt, refreshAt.daysMs);
                     }).catch(err => {
                         try {
-                            console.error("error when refrech cache")
-                            console.error(err.stack)
                             if (dataCache.isClose === true) {
                                 return;
                             }
+                            console.error("error when refrech cache")
+                            console.error(err.stack)
                             //cache is not close then set timeout loop again
                             dataCache._refreshAtLoop(asyncRefresh, refreshAt, refreshAt.daysMs);
                         } catch (unexpectedError) {
@@ -147,7 +154,7 @@ class DataCache {
             if (!Number.isInteger(maxMiss)) throw new Error("Invalid maxMiss");
             const maxAgeMiss = options.maxAgeMiss || refreshAge;
             if (!Number.isInteger(maxAgeMiss)) throw new Error("Invalid maxAgeMiss");
-            const _missLRUCache = new (require("lru-cache"))({ max: maxMiss, ttl: maxAgeMiss * 1000 })
+            const _missLRUCache = new LRUCache({ max: maxMiss, ttl: maxAgeMiss * 1000 })
             Object.defineProperty(this, "_missCache", { get: () => _missLRUCache, configurable: false, enumerable: false });
             Object.defineProperty(this, "maxMiss", { get: () => maxMiss, configurable: false, enumerable: true });
             Object.defineProperty(this, "maxAgeMiss", { get: () => maxAgeMiss, configurable: false, enumerable: true });
@@ -234,20 +241,6 @@ class DataCache {
     }
 
     /**
-     * alias of delele()
-     * delete key from cache.
-     * 
-     * @param {*} key 
-     * @returns 
-     */
-    del(key) {
-        this._cache.delete(key);
-        //remove miss cache too. since we remove key from cache
-        if (this._missCache != null) this._missCache.delete(key);
-    }
-
-
-    /**
     * delele key from cache.
      * 
      * @param {*} key 
@@ -277,16 +270,6 @@ class DataCache {
      */
     entries() {
         return this._cache.entries();
-    }
-
-    /**
-     * Find a value for which the supplied fn method returns a truthy value, similar to Array.find().
-     * fn is called as fn(value, key, cache).
-     * @param {*} findFunction 
-     * @returns 
-     */
-    find(findFunction) {
-        return this._cache.find(findFunction);
     }
 
     /**
@@ -326,6 +309,9 @@ class DataCache {
         if (this.isClose === true) return;//already close
         const close = true;
         Object.defineProperty(this, "isClose", { get: () => close, configurable: false, enumerable: true });
+        if (this._timeoutId) {
+            clearTimeout(this._timeoutId);
+        }
         this._cache.clear();
     }
 

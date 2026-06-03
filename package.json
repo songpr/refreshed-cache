@@ -1,7 +1,7 @@
 {
   "name": "refreshed-cache",
   "description": "caching data with LRU Cache and refresh it within specified time",
-  "version": "1.5.3",
+  "version": "1.7.0",
   "main": "index.js",
   "scripts": {
     "test": "jest",
@@ -23,15 +23,17 @@
   },
   "homepage": "https://github.com/songpr/refreshed-cache#readme",
   "devDependencies": {
-    "csv-generate": "^3.4.3",
-    "csv-parse": "^4.16.3",
-    "delay": "^5.0.0",
-    "got": "^11.8.3",
-    "jest": "^26.6.3",
-    "jest-junit": "^13.0.0"
+    "@faker-js/faker": "^10.4.0",
+    "csv-generate": "^4.5.1",
+    "csv-parse": "^6.2.1",
+    "delay": "^7.0.0",
+    "got": "^15.0.5",
+    "jest": "^30.4.2",
+    "jest-junit": "^17.0.0",
+    "postgres": "^3.4.9"
   },
   "dependencies": {
-    "lru-cache": "^7.4.0"
+    "lru-cache": "^11.5.1"
   },
   "jest-junit": {
     "suiteNameTemplate": "{filepath}",

@@ -1,5 +1,6 @@
 test("test lru-cache max",()=>{
-    const cache = new (require("lru-cache"))({ max: 3});
+    const { LRUCache } = require("lru-cache");
+    const cache = new LRUCache({ max: 3});
     for (const [key,value] of Object.entries({ a: 1, b: 2, c: 3, d: 4 })){
         cache.set(key,value);
     }
