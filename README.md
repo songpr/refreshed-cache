@@ -17,10 +17,27 @@ APIs have been kept to be minimal, unless there are useful use cases.
 3. **Time-aligned freshness.** `refreshAt: {days, at}` supports "rebuild the cache at 02:00 daily" — a first-class need for reference data, pricing tables, feature flags, config — that `lru-cache` has no concept of.
 4. **Encapsulated data provider.** Fetch logic (`fetch`, `fetchByKey`, `fetchByKeys`) lives with the cache config, not scattered across call sites.
 
+### At a glance
+
+| | raw `lru-cache` (`fetchMethod` + `allowStale`) | `refreshed-cache` |
+| :--- | :--- | :--- |
+| Refresh model | **Pull** — on access, after stale | **Push** — on timer / wall-clock, ahead of access |
+| Who pays refresh latency | First requester after expiry | Nobody (background loop does it) |
+| Backend load scales with | Read traffic (QPS) | Cache size × refresh interval |
+| Refresh whole hot set in one query | ✗ (per-key) | ✓ (`fetch` / `fetchByKeys`) |
+| "Rebuild at 02:00 daily" | ✗ | ✓ (`refreshAt: {days, at}`) |
+| Single-flight coalescing | ✓ (built in) | ✓ (`getOrFetch`) |
+| Negative caching of misses | ✗ (you build it) | ✓ (`maxMiss` / `maxAgeMiss`) |
+
 ### Position
 > **`refreshed-cache` is for read-heavy workloads over a bounded, slowly-changing dataset (reference/config/catalog data) where you want the hot set kept fresh *proactively on a schedule* — so no request ever pays refresh latency — rather than lazily revalidated on access like raw `lru-cache`.**
 
-If a use case doesn't match that description, the honest recommendation is raw `lru-cache` (`fetchMethod` + `allowStale`).
+### When raw `lru-cache` is the better choice (be honest)
+- Your dataset is unbounded or high-cardinality and you only ever want lazy, per-key population → use `lru-cache.fetch()`.
+- You're happy serving stale-while-revalidate and don't need scheduled/time-aligned freshness.
+- You need *only* coalescing or batching — `lru-cache`'s own `fetch()` already coalesces in-flight requests, and [`dataloader`](https://github.com/graphql/dataloader) already batches. `refreshed-cache`'s edge is that coalescing, batching, negative caching, and **scheduled push refresh** share one store and one config — not that any single one of those is novel.
+
+In short: pick `refreshed-cache` when "keep the hot set warm on a schedule" is the requirement; pick raw `lru-cache` when "populate lazily on demand" is enough.
 
 ## Installation:
 

@@ -1,29 +1,67 @@
 const postgres = require('postgres');
 const DataCache = require('../index.js');
+const { sleep, measureMemory, percentiles } = require('./lib/bench-utils');
+const { getArg, isChild, emitResult, orchestrate } = require('./lib/isolated-runner');
 
-// Parse duration from args (e.g., node run-load-test.js --duration=600)
-const args = process.argv.slice(2);
-const durationArg = args.find(arg => arg.startsWith('--duration='));
-const TOTAL_DURATION_SEC = durationArg ? parseInt(durationArg.split('=')[1], 10) : 600; // Default 10 mins (600s)
+const TOTAL_DURATION_SEC = parseInt(getArg('duration', '600'), 10); // Default 10 mins (600s)
 
 const connectionString = 'postgres://benchmark_user:benchmark_password@localhost:5439/benchmark_db';
 // Higher pool size to support concurrent pipelined load test
 const sql = postgres(connectionString, { max: 100 });
 
-function getMemoryUsage() {
-    if (global.gc) {
-        try {
-            global.gc();
-        } catch (e) {}
-    }
-    const mem = process.memoryUsage();
-    return {
-        heapUsed: (mem.heapUsed / 1024 / 1024).toFixed(2),
-        rss: (mem.rss / 1024 / 1024).toFixed(2)
-    };
-}
-
-const sleep = ms => new Promise(res => setTimeout(res, ms));
+// Each strategy is isolated in its own process (see lib/isolated-runner.js).
+const STRATEGIES = [
+    { key: 'direct', label: 'Direct Prepared Statements (No Cache)', setup: async () => null },
+    {
+        key: 'lazy',
+        label: 'Lazy Fetch-on-Miss (max: 100000)',
+        setup: async (trackedSql) => {
+            const cache = new DataCache(
+                async () => [],
+                {
+                    max: 100000,
+                    maxAge: 30,
+                    refreshAge: 30,
+                    resetOnRefresh: false,
+                    fetchByKey: async (key) => {
+                        const [row] = await trackedSql`SELECT uuid, name, email, metadata FROM users WHERE uuid = ${key}`;
+                        return row || undefined;
+                    }
+                }
+            );
+            await cache.init();
+            return cache;
+        }
+    },
+    {
+        key: 'active',
+        label: 'Active-Only Refresh Cache (max: 100000)',
+        setup: async (trackedSql) => {
+            const cache = new DataCache(
+                async (recentKeys) => {
+                    if (recentKeys && recentKeys.length > 0) {
+                        const rows = await trackedSql`SELECT uuid, name, email, metadata FROM users WHERE uuid IN ${trackedSql(recentKeys)}`;
+                        return rows.map(r => [r.uuid, r]);
+                    }
+                    return [];
+                },
+                {
+                    max: 100000,
+                    maxAge: 30,
+                    refreshAge: 30,
+                    resetOnRefresh: false,
+                    passRecentKeysOnRefresh: true,
+                    fetchByKey: async (key) => {
+                        const [row] = await trackedSql`SELECT uuid, name, email, metadata FROM users WHERE uuid = ${key}`;
+                        return row || undefined;
+                    }
+                }
+            );
+            await cache.init();
+            return cache;
+        }
+    },
+];
 
 async function runLoadTestStrategy(name, setupCacheFn) {
     console.log(`\n======================================================`);
@@ -31,16 +69,15 @@ async function runLoadTestStrategy(name, setupCacheFn) {
     console.log(`Duration: ${TOTAL_DURATION_SEC}s | Interval stats: 30s | Ceiling: 100,000 keys`);
     console.log(`======================================================`);
 
-    getMemoryUsage();
-    await sleep(500);
-    const baseMem = getMemoryUsage();
+    const baseMem = await measureMemory();
     console.log(`Base Memory: Heap ${baseMem.heapUsed} MB | RSS ${baseMem.rss} MB`);
 
     let dbQueryCount = 0;
+    let totalDBQueries = 0;
     const trackedSql = (queryParts, ...values) => {
         if (queryParts && Array.isArray(queryParts) && queryParts.raw) {
             dbQueryCount++;
-            return sql(queryParts, ...values);
+            totalDBQueries++;
         }
         return sql(queryParts, ...values);
     };
@@ -93,7 +130,7 @@ async function runLoadTestStrategy(name, setupCacheFn) {
 
                 const qStart = process.hrtime.bigint();
                 let val;
-                
+
                 if (cache) {
                     val = await cache.getOrFetch(key);
                 } else {
@@ -104,11 +141,11 @@ async function runLoadTestStrategy(name, setupCacheFn) {
 
                 const qDiff = Number(process.hrtime.bigint() - qStart) / 1e6; // Convert nanoseconds to milliseconds
                 intervalLatencies.push(qDiff);
-                
+
                 intervalRequests++;
                 if (val !== undefined) {
                     intervalHits++;
-                    
+
                     // Periodic sample correctness check (0.1% of queries)
                     if (Math.random() < 0.001) {
                         const [dbVal] = await sql`SELECT uuid, name, email, metadata FROM users WHERE uuid = ${key}`;
@@ -136,8 +173,9 @@ async function runLoadTestStrategy(name, setupCacheFn) {
     for (let t = 1; t <= totalIntervals; t++) {
         await sleep(intervalSec * 1000);
 
-        const latencies = [...intervalLatencies].sort((a, b) => a - b);
+        const snapshotLatencies = intervalLatencies;
         intervalLatencies = [];
+        const pct = percentiles(snapshotLatencies);
 
         const hits = intervalHits;
         const requests = intervalRequests;
@@ -147,29 +185,27 @@ async function runLoadTestStrategy(name, setupCacheFn) {
         totalHits += hits;
         totalRequests += requests;
 
-        const p50 = latencies.length ? latencies[Math.floor(latencies.length * 0.50)].toFixed(2) : '0.00';
-        const p95 = latencies.length ? latencies[Math.floor(latencies.length * 0.95)].toFixed(2) : '0.00';
-        const p99 = latencies.length ? latencies[Math.floor(latencies.length * 0.99)].toFixed(2) : '0.00';
-        const avg = latencies.length ? (latencies.reduce((a, b) => a + b, 0) / latencies.length).toFixed(2) : '0.00';
         const throughput = Math.round(requests / intervalSec);
-        const mem = getMemoryUsage();
+        const mem = await measureMemory();
+        const intervalDbQueries = dbQueryCount;
+        dbQueryCount = 0;
 
-        console.log(`[${t * intervalSec}s] Cache Size: ${cache ? cache.size : 'N/A'} | Ops: ${throughput}/sec | Hit Rate: ${((hits / requests) * 100).toFixed(1)}% | p50: ${p50}ms, p95: ${p95}ms, p99: ${p99}ms | DB Queries: ${dbQueryCount} | Heap: ${mem.heapUsed} MB | RSS: ${mem.rss} MB`);
+        // NOTE: "Hit Rate" here is the row-EXISTENCE rate (key was found in DB or cache),
+        // NOT the pure cache-hit rate. See benchmark/README.md §8 (methodology audit).
+        console.log(`[${t * intervalSec}s] Cache Size: ${cache ? cache.size : 'N/A'} | Ops: ${throughput}/sec | Row-Exist Rate: ${((hits / requests) * 100).toFixed(1)}% | p50: ${pct.p50}ms, p95: ${pct.p95}ms, p99: ${pct.p99}ms | DB Queries: ${intervalDbQueries} | Heap: ${mem.heapUsed} MB | RSS: ${mem.rss} MB`);
 
         statsHistory.push({
             elapsed: t * intervalSec,
             throughput,
             hitRate: ((hits / requests) * 100).toFixed(1),
-            avgLatency: avg,
-            p50,
-            p95,
-            p99,
-            dbQueries: dbQueryCount,
+            avgLatency: pct.avg,
+            p50: pct.p50,
+            p95: pct.p95,
+            p99: pct.p99,
+            dbQueries: intervalDbQueries,
             heap: mem.heapUsed,
             rss: mem.rss
         });
-
-        dbQueryCount = 0;
     }
 
     isRunning = false;
@@ -178,13 +214,13 @@ async function runLoadTestStrategy(name, setupCacheFn) {
     if (cache) {
         await cache.close();
     }
-    await sleep(2000);
-    const finalMem = getMemoryUsage();
+    const finalMem = await measureMemory();
 
     return {
         name,
         statsHistory,
         finalHitRate: ((totalHits / totalRequests) * 100).toFixed(1),
+        totalDBQueries,
         peakHeapMB: Math.max(...statsHistory.map(h => parseFloat(h.heap))).toFixed(2),
         peakRssMB: Math.max(...statsHistory.map(h => parseFloat(h.rss))).toFixed(2),
         baseHeapMB: baseMem.heapUsed,
@@ -199,87 +235,37 @@ async function runLoadTestStrategy(name, setupCacheFn) {
     };
 }
 
-async function main() {
-    // Parse arguments
-    const args = process.argv.slice(2);
-    const roundsArg = args.find(arg => arg.startsWith('--rounds='));
-    const rounds = roundsArg ? parseInt(roundsArg.split('=')[1], 10) : 1;
-
-    // Warm up DB
+async function warmup() {
     await Promise.all(Array.from({ length: 10 }, () => sql`SELECT 1`));
+}
 
-    const results = [];
+async function main() {
+    const rounds = parseInt(getArg('rounds', '1'), 10);
 
-    for (let r = 1; r <= rounds; r++) {
-        const prefix = rounds > 1 ? `[Round ${r}] ` : '';
-        console.log(`\n\n=== ROUND ${r} OF ${rounds} ===`);
-
-        // Strategy 1: Direct Prepared Statements (No Cache)
-        results.push(await runLoadTestStrategy(
-            `${prefix}Direct Prepared Statements (No Cache)`,
-            async () => null
-        ));
-        await sleep(5000);
-
-        // Strategy 2: Lazy Fetch-on-Miss (max: 100000)
-        results.push(await runLoadTestStrategy(
-            `${prefix}Lazy Fetch-on-Miss (max: 100000)`,
-            async (trackedSql) => {
-                const cache = new DataCache(
-                    async () => [],
-                    {
-                        max: 100000,
-                        maxAge: 30,
-                        refreshAge: 30,
-                        resetOnRefresh: false,
-                        fetchByKey: async (key) => {
-                            const [row] = await trackedSql`SELECT uuid, name, email, metadata FROM users WHERE uuid = ${key}`;
-                            return row || undefined;
-                        }
-                    }
-                );
-                await cache.init();
-                return cache;
-            }
-        ));
-        await sleep(5000);
-
-        // Strategy 3: Active-Only Refresh Cache (max: 100000)
-        results.push(await runLoadTestStrategy(
-            `${prefix}Active-Only Refresh Cache (max: 100000)`,
-            async (trackedSql) => {
-                const cache = new DataCache(
-                    async (recentKeys) => {
-                        if (recentKeys && recentKeys.length > 0) {
-                            const rows = await trackedSql`SELECT uuid, name, email, metadata FROM users WHERE uuid IN ${trackedSql(recentKeys)}`;
-                            return rows.map(r => [r.uuid, r]);
-                        }
-                        return [];
-                    },
-                    {
-                        max: 100000,
-                        maxAge: 30,
-                        refreshAge: 30,
-                        resetOnRefresh: false,
-                        passRecentKeysOnRefresh: true,
-                        fetchByKey: async (key) => {
-                            const [row] = await trackedSql`SELECT uuid, name, email, metadata FROM users WHERE uuid = ${key}`;
-                            return row || undefined;
-                        }
-                    }
-                );
-                await cache.init();
-                return cache;
-            }
-        ));
-
-        if (r < rounds) {
-            await sleep(5000);
-        }
+    // CHILD MODE: a single strategy in a fresh, isolated process.
+    if (isChild) {
+        const key = getArg('strategy');
+        const round = parseInt(getArg('round', '1'), 10);
+        const strat = STRATEGIES.find(s => s.key === key);
+        if (!strat) throw new Error(`Unknown strategy key: ${key}`);
+        const prefix = rounds > 1 ? `[Round ${round}] ` : '';
+        await warmup();
+        const result = await runLoadTestStrategy(`${prefix}${strat.label}`, strat.setup);
+        emitResult(result);
+        await sql.end();
+        return;
     }
 
+    // PARENT MODE: fork one fresh process per (round, strategy).
+    const results = await orchestrate({
+        scriptPath: __filename,
+        strategyKeys: STRATEGIES.map(s => s.key),
+        rounds,
+        passArgs: process.argv.slice(2),
+    });
+
     console.log(`\n======================================================`);
-    console.log(`LOAD TEST RESULTS & ROI ANALYSIS (${rounds} ROUNDS)`);
+    console.log(`LOAD TEST RESULTS & ROI ANALYSIS (${rounds} ROUNDS, process-isolated)`);
     console.log(`======================================================`);
     console.table(results.map(r => ({
         'Strategy': r.name,
@@ -287,7 +273,8 @@ async function main() {
         'p50 Latency': `${r.p50}ms`,
         'p95 Latency': `${r.p95}ms`,
         'p99 Latency': `${r.p99}ms`,
-        'Hit Rate': `${r.finalHitRate}%`,
+        'Row-Exist Rate': `${r.finalHitRate}%`,
+        'DB Queries': r.totalDBQueries,
         'Peak Heap (MB)': r.peakHeapMB,
         'Base Heap (MB)': r.baseHeapMB,
         'Heap Growth (MB)': (r.peakHeapMB - r.baseHeapMB).toFixed(2),

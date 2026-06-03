@@ -1,31 +1,13 @@
 const postgres = require('postgres');
 const DataCache = require('../index.js');
+const { sleep, measureMemory, percentiles } = require('./lib/bench-utils');
+const { getArg, isChild, emitResult, orchestrate } = require('./lib/isolated-runner');
 
-// Parse duration from args (default to 600s / 10 minutes)
-const args = process.argv.slice(2);
-const durationArg = args.find(arg => arg.startsWith('--duration='));
-const TOTAL_DURATION_SEC = durationArg ? parseInt(durationArg.split('=')[1], 10) : 600;
+const TOTAL_DURATION_SEC = parseInt(getArg('duration', '600'), 10);
 
 const connectionString = 'postgres://benchmark_user:benchmark_password@localhost:5439/benchmark_db';
 // High connection pool size to prevent connection throttling during benchmark
 const sql = postgres(connectionString, { max: 100 });
-
-// Helper to delay
-const sleep = ms => new Promise(res => setTimeout(res, ms));
-
-// Helper to get memory usage in MB
-function getMemoryUsage() {
-    if (global.gc) {
-        try {
-            global.gc();
-        } catch (e) {}
-    }
-    const mem = process.memoryUsage();
-    return {
-        heapUsed: (mem.heapUsed / 1024 / 1024).toFixed(2),
-        rss: (mem.rss / 1024 / 1024).toFixed(2)
-    };
-}
 
 // Bypassed cache subclass that disables promise coalescing (representing old caching logic)
 class DataCacheNoCoalescing extends DataCache {
@@ -78,21 +60,75 @@ class DataCacheNoCoalescing extends DataCache {
     }
 }
 
+// Each strategy is isolated in its own process (see lib/isolated-runner.js).
+const STRATEGIES = [
+    { key: 'direct', label: 'Direct Prepared Statements (No Cache)', setup: async () => null },
+    {
+        key: 'old',
+        label: 'Old Caching Logic (No Coalescing, Individual Miss Fetches)',
+        setup: async (trackedSql) => {
+            const cache = new DataCacheNoCoalescing(
+                async () => [],
+                {
+                    max: 100000,
+                    maxAge: 60,
+                    refreshAge: 60,
+                    resetOnRefresh: false,
+                    fetchByKey: async (key) => {
+                        await sleep(10); // Simulate DB response delay
+                        const [row] = await trackedSql`SELECT uuid, name, email FROM users WHERE uuid = ${key}`;
+                        return row || undefined;
+                    }
+                }
+            );
+            await cache.init();
+            return cache;
+        }
+    },
+    {
+        key: 'new',
+        label: 'New Caching Logic (Single-flight Coalescing & Batch Loading enabled)',
+        setup: async (trackedSql) => {
+            const cache = new DataCache(
+                async () => [],
+                {
+                    max: 100000,
+                    maxAge: 60,
+                    refreshAge: 60,
+                    resetOnRefresh: false,
+                    fetchByKeys: async (keys) => {
+                        await sleep(10);
+                        const rows = await trackedSql`SELECT uuid, name, email FROM users WHERE uuid IN ${trackedSql(keys)}`;
+                        return rows.map(r => [r.uuid, r]);
+                    },
+                    fetchByKey: async (key) => {
+                        await sleep(10);
+                        const [row] = await trackedSql`SELECT uuid, name, email FROM users WHERE uuid = ${key}`;
+                        return row || undefined;
+                    }
+                }
+            );
+            await cache.init();
+            return cache;
+        }
+    },
+];
+
 async function runBenchmarkStrategy(name, setupCacheFn) {
     console.log(`\n======================================================`);
     console.log(`RUNNING STRATEGY: ${name}`);
     console.log(`Duration: ${TOTAL_DURATION_SEC}s | Cache Ceiling: 100,000 keys`);
     console.log(`======================================================`);
 
-    getMemoryUsage();
-    await sleep(500);
-    const baseMem = getMemoryUsage();
+    const baseMem = await measureMemory();
     console.log(`Base Memory: Heap ${baseMem.heapUsed} MB | RSS ${baseMem.rss} MB`);
 
     let dbQueryCount = 0;
+    let totalDBQueries = 0;
     const trackedSql = (queryParts, ...values) => {
         if (queryParts && Array.isArray(queryParts) && queryParts.raw) {
             dbQueryCount++;
+            totalDBQueries++;
         }
         return sql(queryParts, ...values);
     };
@@ -215,35 +251,32 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
     for (let t = 1; t <= totalIntervals; t++) {
         await sleep(intervalSec * 1000);
 
-        const latencies = [...intervalLatencies].sort((a, b) => a - b);
+        const snapshotLatencies = intervalLatencies;
         intervalLatencies = [];
+        const pct = percentiles(snapshotLatencies);
 
         const requests = intervalRequests;
         intervalRequests = 0;
         totalRequests += requests;
 
-        const p50 = latencies.length ? latencies[Math.floor(latencies.length * 0.50)].toFixed(2) : '0.00';
-        const p95 = latencies.length ? latencies[Math.floor(latencies.length * 0.95)].toFixed(2) : '0.00';
-        const p99 = latencies.length ? latencies[Math.floor(latencies.length * 0.99)].toFixed(2) : '0.00';
-        const avg = latencies.length ? (latencies.reduce((a, b) => a + b, 0) / latencies.length).toFixed(2) : '0.00';
         const throughput = Math.round(requests / intervalSec);
-        const mem = getMemoryUsage();
+        const mem = await measureMemory();
+        const intervalDbQueries = dbQueryCount;
+        dbQueryCount = 0;
 
-        console.log(`[${t * intervalSec}s] Cache Size: ${cache ? cache.size : 'N/A'} | Throughput: ${throughput} rps | p50: ${p50}ms | p95: ${p95}ms | p99: ${p99}ms | DB Queries: ${dbQueryCount} | Heap: ${mem.heapUsed} MB | RSS: ${mem.rss} MB`);
+        console.log(`[${t * intervalSec}s] Cache Size: ${cache ? cache.size : 'N/A'} | Throughput: ${throughput} rps | p50: ${pct.p50}ms | p95: ${pct.p95}ms | p99: ${pct.p99}ms | DB Queries: ${intervalDbQueries} | Heap: ${mem.heapUsed} MB | RSS: ${mem.rss} MB`);
 
         statsHistory.push({
             elapsed: t * intervalSec,
             throughput,
-            avgLatency: avg,
-            p50,
-            p95,
-            p99,
-            dbQueries: dbQueryCount,
+            avgLatency: pct.avg,
+            p50: pct.p50,
+            p95: pct.p95,
+            p99: pct.p99,
+            dbQueries: intervalDbQueries,
             heap: mem.heapUsed,
             rss: mem.rss
         });
-
-        dbQueryCount = 0;
     }
 
     isRunning = false;
@@ -285,13 +318,13 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
     if (cache) {
         await cache.close();
     }
-    await sleep(2000);
-    const finalMem = getMemoryUsage();
+    const finalMem = await measureMemory();
 
     return {
         name,
         statsHistory,
         finalHitRate: ((totalHits / totalRequests) * 100).toFixed(1),
+        totalDBQueries,
         peakHeapMB: Math.max(...statsHistory.map(h => parseFloat(h.heap))).toFixed(2),
         peakRssMB: Math.max(...statsHistory.map(h => parseFloat(h.rss))).toFixed(2),
         baseHeapMB: baseMem.heapUsed,
@@ -306,88 +339,37 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
     };
 }
 
-async function main() {
-    // Parse arguments
-    const args = process.argv.slice(2);
-    const roundsArg = args.find(arg => arg.startsWith('--rounds='));
-    const rounds = roundsArg ? parseInt(roundsArg.split('=')[1], 10) : 1;
-
-    // Warm up connections
+async function warmup() {
     await Promise.all(Array.from({ length: 15 }, () => sql`SELECT 1`));
+}
 
-    const results = [];
+async function main() {
+    const rounds = parseInt(getArg('rounds', '1'), 10);
 
-    for (let r = 1; r <= rounds; r++) {
-        const prefix = rounds > 1 ? `[Round ${r}] ` : '';
-        console.log(`\n\n=== ROUND ${r} OF ${rounds} ===`);
-
-        // Strategy A: Direct Postgres (No Cache)
-        results.push(await runBenchmarkStrategy(
-            `${prefix}Direct Prepared Statements (No Cache)`,
-            async () => null
-        ));
-        await sleep(5000);
-
-        // Strategy B: Caching without New Features (Old Fallback Logic)
-        results.push(await runBenchmarkStrategy(
-            `${prefix}Old Caching Logic (No Coalescing, Individual Miss Fetches)`,
-            async (trackedSql) => {
-                const cache = new DataCacheNoCoalescing(
-                    async () => [],
-                    {
-                        max: 100000,
-                        maxAge: 60,
-                        refreshAge: 60,
-                        resetOnRefresh: false,
-                        fetchByKey: async (key) => {
-                            // Simulate DB response delay
-                            await sleep(10);
-                            const [row] = await trackedSql`SELECT uuid, name, email FROM users WHERE uuid = ${key}`;
-                            return row || undefined;
-                        }
-                    }
-                );
-                await cache.init();
-                return cache;
-            }
-        ));
-        await sleep(5000);
-
-        // Strategy C: Caching with New Features (Single-flight Coalescing & Batch Loading)
-        results.push(await runBenchmarkStrategy(
-            `${prefix}New Caching Logic (Single-flight Coalescing & Batch Loading enabled)`,
-            async (trackedSql) => {
-                const cache = new DataCache(
-                    async () => [],
-                    {
-                        max: 100000,
-                        maxAge: 60,
-                        refreshAge: 60,
-                        resetOnRefresh: false,
-                        fetchByKeys: async (keys) => {
-                            await sleep(10);
-                            const rows = await trackedSql`SELECT uuid, name, email FROM users WHERE uuid IN ${trackedSql(keys)}`;
-                            return rows.map(r => [r.uuid, r]);
-                        },
-                        fetchByKey: async (key) => {
-                            await sleep(10);
-                            const [row] = await trackedSql`SELECT uuid, name, email FROM users WHERE uuid = ${key}`;
-                            return row || undefined;
-                        }
-                    }
-                );
-                await cache.init();
-                return cache;
-            }
-        ));
-
-        if (r < rounds) {
-            await sleep(5000);
-        }
+    // CHILD MODE: a single strategy in a fresh, isolated process.
+    if (isChild) {
+        const key = getArg('strategy');
+        const round = parseInt(getArg('round', '1'), 10);
+        const strat = STRATEGIES.find(s => s.key === key);
+        if (!strat) throw new Error(`Unknown strategy key: ${key}`);
+        const prefix = rounds > 1 ? `[Round ${round}] ` : '';
+        await warmup();
+        const result = await runBenchmarkStrategy(`${prefix}${strat.label}`, strat.setup);
+        emitResult(result);
+        await sql.end();
+        return;
     }
 
+    // PARENT MODE: fork one fresh process per (round, strategy).
+    const results = await orchestrate({
+        scriptPath: __filename,
+        strategyKeys: STRATEGIES.map(s => s.key),
+        rounds,
+        passArgs: process.argv.slice(2),
+    });
+
     console.log(`\n======================================================`);
-    console.log(`NEW VS OLD FEATURES BENCHMARK COMPARISON (${rounds} ROUNDS)`);
+    console.log(`NEW VS OLD FEATURES BENCHMARK COMPARISON (${rounds} ROUNDS, process-isolated)`);
     console.log(`======================================================`);
     console.table(results.map(r => ({
         'Strategy': r.name,
@@ -395,6 +377,7 @@ async function main() {
         'p50 Latency': `${r.p50}ms`,
         'p95 Latency': `${r.p95}ms`,
         'p99 Latency': `${r.p99}ms`,
+        'DB Queries': r.totalDBQueries,
         'Peak Heap (MB)': r.peakHeapMB,
         'Base Heap (MB)': r.baseHeapMB,
         'Heap Growth (MB)': (r.peakHeapMB - r.baseHeapMB).toFixed(2),
