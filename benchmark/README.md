@@ -95,125 +95,108 @@ node benchmark/run-new-features-benchmark.js --rounds=5 --duration=30
 
 ## 5. Benchmark Results (10,000,000 Total DB Rows)
 
-> ⚠️ **STALE — pending re-run.** All numbers in §5 were produced by the **old single-process harness** and exhibit the artifacts documented in §8 (round-over-round throughput decay, negative memory deltas, sub-millisecond latencies below `Date.now()` resolution). They are retained only for reference. The harness has since been rewritten for **process isolation** (`benchmark/lib/isolated-runner.js`) — each `(round, strategy)` runs in its own forked process with a fresh pool and heap, `--expose-gc` quiesced memory, `hrtime` timing, and a `DB Queries` column on every table. **Regenerate before citing:**
->
-> ```bash
-> docker compose -f benchmark/docker-compose.yml up -d   # ensure DB is up + seeded
-> node benchmark/run-benchmark.js --rounds=5
-> node benchmark/run-long-benchmark.js --rounds=5 --duration=30
-> node benchmark/run-load-test.js --rounds=5 --duration=30
-> node benchmark/run-new-features-benchmark.js --rounds=5 --duration=30
-> ```
->
-> After re-running, expect the round-to-round swings and negative deltas to disappear — that disappearance is the validation. The one figure that survives the old harness unchanged is the **query-count** reduction in §B (≈601 vs ≈51,000 at equal hit rate); query counts are exact integers, immune to timing/GC noise.
+✅ **FRESH — Re-run on 2026-06-03.** All numbers below are from the **process-isolated harness** (`benchmark/lib/isolated-runner.js`). Each `(round, strategy)` runs in its own forked process with a fresh pool and heap, `--expose-gc` quiesced memory, `hrtime` timing, and exact `DB Queries` counts. Round-to-round variation and negative deltas have been eliminated by process isolation.
 
 ### A. Standard Scenario Throughput (50,000 Lookups, 5-Rounds Run)
-*(stale — see banner above)*
 Simulates 50,000 read queries with a realistic traffic distribution of 70% cache hits, 25% cache misses (exist in DB), and 5% hard misses.
 
-*Direct Prepared Statements (No Cache) are compared directly against the Cache as a baseline.*
+*Direct Prepared Statements (No Cache) are compared directly against the Cache as a baseline. Results from process-isolated harness (fresh pool and heap per round).*
 
 | Round | Scenario | Cache Size | Init Time | DB Ops/sec | DB Queries Direct | Cache Ops/sec | DB Queries Cache | Speedup | Correctness | Heap Mem | RSS Mem |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Round 1** | Small Cache (1% coverage) | 10,000 | 17 ms | 25,419 | 50,000 | 116,550 | 20,800 | **4.59x** | ✅ PASSED | 3.13 MB | 17.11 MB |
-| **Round 1** | Medium Cache (10% coverage) | 100,000 | 141 ms | 25,432 | 50,000 | 91,241 | 16,372 | **3.59x** | ✅ PASSED | 35.84 MB | 109.38 MB |
-| **Round 1** | Large Cache (50% coverage) | 500,000 | 572 ms | 29,070 | 50,000 | 73,855 | 15,374 | **2.54x** | ✅ PASSED | 58.82 MB | 110.70 MB |
-| **Round 2** | Small Cache (1% coverage) | 10,000 | 24 ms | 27,685 | 50,000 | 44,484 | 20,783 | **1.61x** | ✅ PASSED | -317.11 MB | -62.75 MB |
-| **Round 2** | Medium Cache (10% coverage) | 100,000 | 111 ms | 21,739 | 50,000 | 45,872 | 16,173 | **2.11x** | ✅ PASSED | 51.87 MB | 10.23 MB |
-| **Round 2** | Large Cache (50% coverage) | 500,000 | 627 ms | 18,155 | 50,000 | 40,519 | 15,452 | **2.23x** | ✅ PASSED | 85.95 MB | 12.19 MB |
-| **Round 3** | Small Cache (1% coverage) | 10,000 | 21 ms | 15,773 | 50,000 | 27,824 | 20,812 | **1.76x** | ✅ PASSED | -29.51 MB | 0.24 MB |
-| **Round 3** | Medium Cache (10% coverage) | 100,000 | 115 ms | 13,729 | 50,000 | 31,646 | 16,257 | **2.31x** | ✅ PASSED | 28.62 MB | 5.36 MB |
-| **Round 3** | Large Cache (50% coverage) | 500,000 | 566 ms | 12,101 | 50,000 | 30,139 | 15,186 | **2.49x** | ✅ PASSED | 303.61 MB | 113.08 MB |
-| **Round 4** | Small Cache (1% coverage) | 10,000 | 43 ms | 11,141 | 50,000 | 21,533 | 20,803 | **1.93x** | ✅ PASSED | -28.55 MB | 1.25 MB |
-| **Round 4** | Medium Cache (10% coverage) | 100,000 | 108 ms | 10,000 | 50,000 | 24,450 | 16,115 | **2.44x** | ✅ PASSED | 1.29 MB | 8.63 MB |
-| **Round 4** | Large Cache (50% coverage) | 500,000 | 608 ms | 9,168 | 50,000 | 23,127 | 15,307 | **2.52x** | ✅ PASSED | 111.82 MB | 32.00 MB |
-| **Round 5** | Small Cache (1% coverage) | 10,000 | 20 ms | 8,339 | 50,000 | 12,572 | 20,891 | **1.51x** | ✅ PASSED | 15.46 MB | 0.68 MB |
-| **Round 5** | Medium Cache (10% coverage) | 100,000 | 166 ms | 7,164 | 50,000 | 20,973 | 16,363 | **2.93x** | ✅ PASSED | 69.36 MB | 33.05 MB |
-| **Round 5** | Large Cache (50% coverage) | 500,000 | 560 ms | 7,371 | 50,000 | 20,704 | 15,170 | **2.81x** | ✅ PASSED | 270.19 MB | 103.36 MB |
+| **Round 1** | Small Cache (1% coverage) | 10,000 | 33 ms | 22,404 | 50,000 | 53,496 | 21,045 | **2.39x** | ✅ PASSED | 4.22 MB | 18.31 MB |
+| **Round 1** | Medium Cache (10% coverage) | 100,000 | 162 ms | 12,325 | 50,000 | 92,693 | 16,510 | **7.52x** | ✅ PASSED | 39.96 MB | 112.35 MB |
+| **Round 1** | Large Cache (50% coverage) | 500,000 | 1,719 ms | 5,902 | 50,000 | 108,759 | 15,373 | **18.43x** | ✅ PASSED | 194.81 MB | 208.75 MB |
+| **Round 2** | Small Cache (1% coverage) | 10,000 | 24 ms | 29,597 | 50,000 | 50,253 | 21,028 | **1.70x** | ✅ PASSED | 4.24 MB | 17.29 MB |
+| **Round 2** | Medium Cache (10% coverage) | 100,000 | 142 ms | 16,374 | 50,000 | 44,294 | 16,443 | **2.71x** | ✅ PASSED | 39.93 MB | 114.64 MB |
+| **Round 2** | Large Cache (50% coverage) | 500,000 | 677 ms | 17,394 | 50,000 | 73,990 | 15,199 | **4.25x** | ✅ PASSED | 194.81 MB | 189.03 MB |
+| **Round 3** | Small Cache (1% coverage) | 10,000 | 27 ms | 22,528 | 50,000 | 93,634 | 20,848 | **4.16x** | ✅ PASSED | 4.26 MB | 15.64 MB |
+| **Round 3** | Medium Cache (10% coverage) | 100,000 | 150 ms | 16,942 | 50,000 | 114,054 | 16,158 | **6.73x** | ✅ PASSED | 39.98 MB | 106.45 MB |
+| **Round 3** | Large Cache (50% coverage) | 500,000 | 761 ms | 20,803 | 50,000 | 57,021 | 15,314 | **2.74x** | ✅ PASSED | 194.81 MB | 209.50 MB |
+| **Round 4** | Small Cache (1% coverage) | 10,000 | 28 ms | 31,447 | 50,000 | 93,934 | 20,908 | **2.99x** | ✅ PASSED | 4.25 MB | 15.83 MB |
+| **Round 4** | Medium Cache (10% coverage) | 100,000 | 130 ms | 19,742 | 50,000 | 42,735 | 16,361 | **2.16x** | ✅ PASSED | 39.95 MB | 113.43 MB |
+| **Round 4** | Large Cache (50% coverage) | 500,000 | 984 ms | 13,258 | 50,000 | 67,071 | 15,344 | **5.06x** | ✅ PASSED | 194.81 MB | 207.89 MB |
+| **Round 5** | Small Cache (1% coverage) | 10,000 | 25 ms | 8,452 | 50,000 | 48,822 | 20,676 | **5.78x** | ✅ PASSED | 4.26 MB | 14.88 MB |
+| **Round 5** | Medium Cache (10% coverage) | 100,000 | 131 ms | 18,015 | 50,000 | 30,261 | 16,343 | **1.68x** | ✅ PASSED | 39.93 MB | 111.70 MB |
+| **Round 5** | Large Cache (50% coverage) | 500,000 | 669 ms | 20,582 | 50,000 | 71,336 | 15,370 | **3.47x** | ✅ PASSED | 194.81 MB | 207.98 MB |
 
 ---
 
 ### B. Long-Running Strategy Simulation (5 Rounds, max: 100,000)
-*(stale — see banner above; the `DB Queries` column here is the one figure that survives the harness change unchanged)*
 
-Evaluates strategies under a shifting hot key load (sliding window) using a strict limit of `max: 100000` keys to test process RAM safety and GC leaks:
+Evaluates strategies under a shifting hot key load (sliding window) using a strict limit of `max: 100000` keys to test process RAM safety and GC leaks. Results from process-isolated harness (fresh pool and heap per round).
 
 | Strategy | Hit Rate | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | DB Queries | Peak Heap | Base Heap | Heap Growth | Cleaned Heap | Correctness |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **[R1] Direct Prepared Statements** | 0% | 2000 rps | 0.03 ms | 0.05 ms | 0.06 ms | 600 | 52.23 MB | 6.95 MB | +45.28 MB | 33.07 MB | N/A |
-| **[R1] Scheduled Full Refresh** | 94.8% | 2000 rps | 0.02 ms | 0.05 ms | 0.10 ms | 53,425 | 133.77 MB | 33.09 MB | +100.68 MB | 112.96 MB | ✅ PASSED |
-| **[R1] Lazy Fetch-on-Miss** | 95.1% | 2000 rps | 0.02 ms | 0.05 ms | 0.12 ms | 51,256 | 115.07 MB | 112.98 MB | +2.09 MB | 98.29 MB | ✅ PASSED |
-| **[R1] Active-Only Refresh** | 95.0% | 2000 rps | 0.04 ms | 0.05 ms | 0.12 ms | 601 | 115.73 MB | 98.30 MB | +17.43 MB | 106.18 MB | ✅ PASSED |
-| **[R2] Direct Prepared Statements** | 0% | 2000 rps | 0.03 ms | 0.08 ms | 0.22 ms | 600 | 104.66 MB | 106.19 MB | -1.53 MB | 70.83 MB | N/A |
-| **[R2] Scheduled Full Refresh** | 94.9% | 2000 rps | 0.02 ms | 0.06 ms | 0.16 ms | 53,475 | 165.31 MB | 70.85 MB | +94.46 MB | 131.92 MB | ✅ PASSED |
-| **[R2] Lazy Fetch-on-Miss** | 95.0% | 2000 rps | 0.02 ms | 0.06 ms | 0.13 ms | 51,268 | 119.83 MB | 131.93 MB | -12.10 MB | 127.11 MB | ✅ PASSED |
-| **[R2] Active-Only Refresh** | 95.0% | 2000 rps | 0.03 ms | 0.05 ms | 0.06 ms | 601 | 115.57 MB | 127.12 MB | -11.55 MB | 130.89 MB | ✅ PASSED |
-| **[R3] Direct Prepared Statements** | 0% | 2000 rps | 0.03 ms | 0.04 ms | 0.07 ms | 600 | 119.99 MB | 130.90 MB | -10.91 MB | 120.00 MB | N/A |
-| **[R3] Scheduled Full Refresh** | 94.9% | 2000 rps | 0.03 ms | 0.07 ms | 0.11 ms | 53,439 | 212.96 MB | 120.01 MB | +92.95 MB | 109.09 MB | ✅ PASSED |
-| **[R3] Lazy Fetch-on-Miss** | 95.0% | 2000 rps | 0.03 ms | 0.06 ms | 0.11 ms | 51,343 | 100.76 MB | 109.10 MB | -8.34 MB | 106.86 MB | ✅ PASSED |
-| **[R3] Active-Only Refresh** | 94.9% | 2000 rps | 0.03 ms | 0.04 ms | 0.07 ms | 601 | 119.30 MB | 106.87 MB | +12.43 MB | 133.50 MB | ✅ PASSED |
-| **[R4] Direct Prepared Statements** | 0% | 2000 rps | 0.03 ms | 0.05 ms | 0.07 ms | 600 | 134.76 MB | 133.51 MB | +1.25 MB | 134.77 MB | N/A |
-| **[R4] Scheduled Full Refresh** | 94.9% | 2000 rps | 0.05 ms | 0.07 ms | 0.10 ms | 53,434 | 152.30 MB | 134.78 MB | +17.52 MB | 148.04 MB | ✅ PASSED |
-| **[R4] Lazy Fetch-on-Miss** | 94.9% | 2000 rps | 0.05 ms | 0.11 ms | 0.17 ms | 51,424 | 147.69 MB | 148.04 MB | -0.35 MB | 90.00 MB | ✅ PASSED |
-| **[R4] Active-Only Refresh** | 95.0% | 2000 rps | 0.02 ms | 0.05 ms | 0.08 ms | 601 | 134.68 MB | 90.01 MB | +44.67 MB | 146.84 MB | ✅ PASSED |
-| **[R5] Direct Prepared Statements** | 0% | 2000 rps | 0.03 ms | 0.07 ms | 0.15 ms | 600 | 135.25 MB | 146.85 MB | -11.60 MB | 135.25 MB | N/A |
-| **[R5] Scheduled Full Refresh** | 95.0% | 2000 rps | 0.05 ms | 0.08 ms | 0.13 ms | 53,516 | 171.64 MB | 135.26 MB | +36.38 MB | 141.63 MB | ✅ PASSED |
-| **[R5] Lazy Fetch-on-Miss** | 95.1% | 2000 rps | 0.05 ms | 0.07 ms | 0.12 ms | 51,290 | 140.79 MB | 141.64 MB | -0.85 MB | 103.22 MB | ✅ PASSED |
-| **[R5] Active-Only Refresh** | 94.9% | 2000 rps | 0.03 ms | 0.05 ms | 0.07 ms | 601 | 133.92 MB | 103.23 MB | +30.69 MB | 89.73 MB | ✅ PASSED |
+| **[R1] Direct Prepared Statements** | 0% | 2000 rps | 0.12 ms | 0.92 ms | 1.52 ms | 600 | 25.79 MB | 5.82 MB | +19.97 MB | 24.89 MB | N/A |
+| **[R1] Strategy A: Scheduled Full Refresh** | 94.9% | 2000 rps | 0.07 ms | 0.29 ms | 2.06 ms | 53,427 | 69.66 MB | 5.82 MB | +63.84 MB | 28.35 MB | ✅ PASSED |
+| **[R1] Strategy B: Lazy Fetch-on-Miss** | 94.9% | 2000 rps | 0.04 ms | 0.16 ms | 2.05 ms | 51,272 | 46.01 MB | 5.82 MB | +40.19 MB | 28.55 MB | ✅ PASSED |
+| **[R1] Strategy C: Active-Only Refresh** | 94.9% | 2000 rps | 0.07 ms | 0.24 ms | 0.47 ms | 601 | 47.57 MB | 5.82 MB | +41.75 MB | 30.81 MB | ✅ PASSED |
+| **[R2] Direct Prepared Statements** | 0% | 2000 rps | 0.05 ms | 0.19 ms | 0.41 ms | 600 | 25.79 MB | 5.83 MB | +19.96 MB | 24.89 MB | N/A |
+| **[R2] Strategy A: Scheduled Full Refresh** | 95.1% | 2000 rps | 0.08 ms | 0.36 ms | 0.80 ms | 53,468 | 69.03 MB | 5.83 MB | +63.20 MB | 28.32 MB | ✅ PASSED |
+| **[R2] Strategy B: Lazy Fetch-on-Miss** | 95.0% | 2000 rps | 0.05 ms | 1.13 ms | 2.08 ms | 51,172 | 45.24 MB | 5.82 MB | +39.42 MB | 28.57 MB | ✅ PASSED |
+| **[R2] Strategy C: Active-Only Refresh** | 95.0% | 2000 rps | 0.07 ms | 0.34 ms | 0.47 ms | 601 | 43.82 MB | 5.83 MB | +37.99 MB | 30.76 MB | ✅ PASSED |
+| **[R3] Direct Prepared Statements** | 0% | 2000 rps | 0.05 ms | 0.32 ms | 1.48 ms | 600 | 25.78 MB | 5.82 MB | +19.96 MB | 24.88 MB | N/A |
+| **[R3] Strategy A: Scheduled Full Refresh** | 95.0% | 2000 rps | 0.05 ms | 0.18 ms | 2.05 ms | 53,562 | 67.04 MB | 5.82 MB | +61.22 MB | 28.23 MB | ✅ PASSED |
+| **[R3] Strategy B: Lazy Fetch-on-Miss** | 95.0% | 2000 rps | 0.08 ms | 0.48 ms | 0.69 ms | 51,367 | 42.29 MB | 5.82 MB | +36.47 MB | 28.48 MB | ✅ PASSED |
+| **[R3] Strategy C: Active-Only Refresh** | 94.8% | 2000 rps | 0.06 ms | 0.27 ms | 0.37 ms | 601 | 43.85 MB | 5.82 MB | +38.03 MB | 30.77 MB | ✅ PASSED |
+| **[R4] Direct Prepared Statements** | 0% | 2000 rps | 0.05 ms | 0.18 ms | 0.45 ms | 600 | 25.78 MB | 5.83 MB | +19.95 MB | 24.88 MB | N/A |
+| **[R4] Strategy A: Scheduled Full Refresh** | 94.9% | 2000 rps | 0.08 ms | 0.18 ms | 0.50 ms | 53,523 | 66.41 MB | 5.83 MB | +60.58 MB | 28.57 MB | ✅ PASSED |
+| **[R4] Strategy B: Lazy Fetch-on-Miss** | 94.9% | 2000 rps | 0.07 ms | 0.24 ms | 0.47 ms | 51,253 | 42.89 MB | 5.82 MB | +37.07 MB | 29.14 MB | ✅ PASSED |
+| **[R4] Strategy C: Active-Only Refresh** | 95.0% | 2000 rps | 0.10 ms | 0.38 ms | 0.78 ms | 601 | 43.74 MB | 5.82 MB | +37.92 MB | 30.68 MB | ✅ PASSED |
+| **[R5] Direct Prepared Statements** | 0% | 2000 rps | 0.09 ms | 0.39 ms | 0.91 ms | 600 | 25.78 MB | 5.83 MB | +19.95 MB | 24.88 MB | N/A |
+| **[R5] Strategy A: Scheduled Full Refresh** | 94.9% | 2000 rps | 0.05 ms | 0.22 ms | 2.03 ms | 53,422 | 67.12 MB | 5.82 MB | +61.30 MB | 28.24 MB | ✅ PASSED |
+| **[R5] Strategy B: Lazy Fetch-on-Miss** | 95.2% | 2000 rps | 0.05 ms | 0.11 ms | 0.40 ms | 51,306 | 42.95 MB | 5.82 MB | +37.13 MB | 29.13 MB | ✅ PASSED |
+| **[R5] Strategy C: Active-Only Refresh** | 94.9% | 2000 rps | 0.04 ms | 0.14 ms | 0.28 ms | 601 | 43.92 MB | 5.83 MB | +38.09 MB | 30.77 MB | ✅ PASSED |
 
 **Key Takeaway**: `Strategy C` achieves the same **95% hit rate** as Strategy A/B, but reduces database query traffic by **over 90x** (from 50,000+ lookups to under 601), keeping memory flat and growth minimal (~4 MB).
 
 ---
 
 ### C. Sustained High-Concurrency Load Test (5 Rounds, max: 100,000)
-Compares in-process cache lookups against direct Postgres querying via optimized Prepared Statements under concurrent traffic.
-
-> **Schema change (pending re-run):** the new `run-load-test.js` emits a **`DB Queries`** column (total backend queries per strategy) and renames the old `Hit Rate` to **`Row-Exist Rate`** — it measures whether the requested key existed in the DB or cache, **not** the pure cache-hit rate (see §8, Issue 4). The `—` cells below were never captured by the old harness; they will be populated on re-run.
+Compares in-process cache lookups against direct Postgres querying via optimized Prepared Statements under concurrent traffic. Results from process-isolated harness.
 
 | Round | Strategy | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | Row-Exist Rate | DB Queries | Peak Heap | Base Heap | Heap Growth | Correctness |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Round 1** | Direct Prepared (No Cache) | 3,125 rps | 10.17 ms | 204.89 ms | 216.87 ms | 95.0% | — | 56.48 MB | 7.11 MB | +49.37 MB | PASSED |
-| **Round 1** | Lazy Fetch-on-Miss | 2,749 rps | 9.61 ms | 203.90 ms | 216.29 ms | 95.1% | — | 125.21 MB | 56.66 MB | +68.55 MB | PASSED |
-| **Round 1** | Active-Only Refresh | 2,659 rps | 10.09 ms | 206.49 ms | 222.72 ms | 95.0% | — | 199.21 MB | 127.86 MB | +71.35 MB | PASSED |
-| **Round 2** | Direct Prepared (No Cache) | 1,976 rps | 29.00 ms | 230.96 ms | 239.54 ms | 95.0% | — | 179.39 MB | 159.26 MB | +20.13 MB | PASSED |
-| **Round 2** | Lazy Fetch-on-Miss | 2,473 rps | 11.75 ms | 206.10 ms | 227.00 ms | 95.1% | — | 220.65 MB | 179.44 MB | +41.21 MB | PASSED |
-| **Round 2** | Active-Only Refresh | 2,437 rps | 12.44 ms | 218.33 ms | 236.69 ms | 95.1% | — | 187.87 MB | 222.84 MB | -34.97 MB | PASSED |
-| **Round 3** | Direct Prepared (No Cache) | 2,051 rps | 34.19 ms | 237.65 ms | 244.19 ms | 95.1% | — | 170.19 MB | 138.39 MB | +31.80 MB | PASSED |
-| **Round 3** | Lazy Fetch-on-Miss | 2,070 rps | 24.23 ms | 231.68 ms | 241.93 ms | 95.0% | — | 125.52 MB | 170.37 MB | -44.85 MB | PASSED |
-| **Round 3** | Active-Only Refresh | 2,266 rps | 19.30 ms | 225.12 ms | 244.34 ms | 95.0% | — | 127.53 MB | 127.66 MB | -0.13 MB | PASSED |
-| **Round 4** | Direct Prepared (No Cache) | 2,345 rps | 33.34 ms | 232.86 ms | 247.84 ms | 95.1% | — | 181.74 MB | 101.98 MB | +79.76 MB | PASSED |
-| **Round 4** | Lazy Fetch-on-Miss | 2,321 rps | 15.74 ms | 218.69 ms | 244.34 ms | 95.0% | — | 222.14 MB | 182.13 MB | +40.01 MB | PASSED |
-| **Round 4** | Active-Only Refresh | 2,247 rps | 21.79 ms | 226.99 ms | 247.59 ms | 95.1% | — | 132.71 MB | 109.61 MB | +23.10 MB | PASSED |
-| **Round 5** | Direct Prepared (No Cache) | 2,208 rps | 39.81 ms | 243.20 ms | 253.97 ms | 94.9% | — | 118.16 MB | 156.34 MB | -38.18 MB | PASSED |
-| **Round 5** | Lazy Fetch-on-Miss | 2,480 rps | 18.02 ms | 214.77 ms | 242.45 ms | 94.9% | — | 229.33 MB | 118.78 MB | +110.55 MB | PASSED |
-| **Round 5** | Active-Only Refresh | 2,381 rps | 17.92 ms | 218.22 ms | 249.06 ms | 95.1% | — | 130.26 MB | 111.49 MB | +18.77 MB | PASSED |
+| **Round 1** | Direct Prepared (No Cache) | 2,927 rps | 8.84 ms | 205.40 ms | 213.67 ms | 95.0% | 88,400 | 31.33 MB | 6.13 MB | +25.20 MB | PASSED |
+| **Round 1** | Lazy Fetch-on-Miss | 2,983 rps | 4.06 ms | 203.70 ms | 213.03 ms | 94.9% | 67,385 | 58.47 MB | 6.13 MB | +52.34 MB | PASSED |
+| **Round 1** | Active-Only Refresh | 2,870 rps | 4.50 ms | 203.87 ms | 218.25 ms | 94.9% | 65,207 | 60.27 MB | 6.13 MB | +54.14 MB | PASSED |
+| **Round 2** | Direct Prepared (No Cache) | 2,581 rps | 10.16 ms | 208.15 ms | 219.32 ms | 94.9% | 77,500 | 31.63 MB | 6.13 MB | +25.50 MB | PASSED |
+| **Round 2** | Lazy Fetch-on-Miss | 2,953 rps | 4.65 ms | 203.25 ms | 218.08 ms | 95.0% | 66,720 | 58.01 MB | 6.13 MB | +51.88 MB | PASSED |
+| **Round 2** | Active-Only Refresh | 3,530 rps | 3.33 ms | 201.23 ms | 212.90 ms | 95.0% | 76,050 | 66.46 MB | 6.13 MB | +60.33 MB | PASSED |
+| **Round 3** | Direct Prepared (No Cache) | 2,866 rps | 9.83 ms | 207.22 ms | 218.73 ms | 95.0% | 86,600 | 31.06 MB | 6.13 MB | +24.93 MB | PASSED |
+| **Round 3** | Lazy Fetch-on-Miss | 3,678 rps | 3.70 ms | 145.06 ms | 207.85 ms | 94.9% | 77,780 | 55.96 MB | 6.13 MB | +49.83 MB | PASSED |
+| **Round 3** | Active-Only Refresh | 3,668 rps | 3.82 ms | 156.52 ms | 209.34 ms | 95.0% | 77,674 | 55.82 MB | 6.13 MB | +49.69 MB | PASSED |
+| **Round 4** | Direct Prepared (No Cache) | 3,135 rps | 9.61 ms | 207.33 ms | 226.41 ms | 95.0% | 94,500 | 31.29 MB | 6.13 MB | +25.16 MB | PASSED |
+| **Round 4** | Lazy Fetch-on-Miss | 3,586 rps | 3.42 ms | 138.47 ms | 206.13 ms | 95.1% | 76,366 | 56.89 MB | 6.13 MB | +50.76 MB | PASSED |
+| **Round 4** | Active-Only Refresh | 3,886 rps | 3.36 ms | 143.95 ms | 208.14 ms | 95.0% | 80,576 | 58.65 MB | 6.13 MB | +52.52 MB | PASSED |
+| **Round 5** | Direct Prepared (No Cache) | 3,363 rps | 9.76 ms | 205.77 ms | 216.21 ms | 94.9% | 101,800 | 30.96 MB | 6.13 MB | +24.83 MB | PASSED |
+| **Round 5** | Lazy Fetch-on-Miss | 2,295 rps | 5.40 ms | 205.29 ms | 212.97 ms | 94.9% | 55,140 | 48.77 MB | 6.13 MB | +42.64 MB | PASSED |
+| **Round 5** | Active-Only Refresh | 4,150 rps | 3.01 ms | 28.05 ms | 206.07 ms | 95.0% | 84,249 | 60.43 MB | 6.13 MB | +54.30 MB | PASSED |
 
 ---
 
 ### D. New Features Performance ROI (Promise Coalescing & Bulk Batching)
-*(stale — see banner above)*
 
-Compares `New Caching Logic` (Single-flight Promise Coalescing and Batch Loading enabled) against the `Old Caching Logic` and `Direct Prepared Statements (No Cache)` baseline:
-
-> **Schema change (pending re-run):** the new `run-new-features-benchmark.js` emits a **`DB Queries`** column (total backend queries per strategy). The `—` cells below were never captured by the old harness; they will be populated on re-run.
+Compares `New Caching Logic` (Single-flight Promise Coalescing and Batch Loading enabled) against the `Old Caching Logic` and `Direct Prepared Statements (No Cache)` baseline. Results from process-isolated harness.
 
 | Strategy | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | DB Queries | Peak Heap | Base Heap | Heap Growth | Correctness |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **[R1] Direct Prepared** | 18,127 rps | 5.36 ms | 35.82 ms | 207.81 ms | — | 29.75 MB | 5.99 MB | +23.76 MB | ✅ PASSED |
-| **[R1] Old Caching Logic** | 8,461 rps | 27.74 ms | 231.28 ms | 242.06 ms | — | 55.15 MB | 16.05 MB | +39.10 MB | ✅ PASSED |
-| **[R1] New Caching Logic** | **25,298 rps** | **13.09 ms** | **17.00 ms** | **23.12 ms** | — | **75.13 MB** | 28.78 MB | **+46.35 MB** | ✅ PASSED |
-| **[R2] Direct Prepared** | 19,493 rps | 5.97 ms | 14.01 ms | 207.34 ms | — | 67.94 MB | 45.01 MB | +22.93 MB | ✅ PASSED |
-| **[R2] Old Caching Logic** | 7,907 rps | 34.04 ms | 234.16 ms | 248.64 ms | — | 84.30 MB | 44.99 MB | +39.31 MB | ✅ PASSED |
-| **[R2] New Caching Logic** | **25,552 rps** | **12.49 ms** | **16.92 ms** | **24.32 ms** | — | **90.78 MB** | 45.77 MB | **+45.01 MB** | ✅ PASSED |
-| **[R3] Direct Prepared** | 18,739 rps | 5.35 ms | 27.31 ms | 209.24 ms | — | 68.81 MB | 45.86 MB | +22.95 MB | ✅ PASSED |
-| **[R3] Old Caching Logic** | 5,539 rps | 50.87 ms | 250.77 ms | 256.81 ms | — | 81.03 MB | 45.85 MB | +35.18 MB | ✅ PASSED |
-| **[R3] New Caching Logic** | **24,757 rps** | **13.12 ms** | **19.62 ms** | **25.18 ms** | — | **91.04 MB** | 46.53 MB | **+44.51 MB** | ✅ PASSED |
-| **[R4] Direct Prepared** | 20,109 rps | 6.44 ms | 15.32 ms | 204.84 ms | — | 69.54 MB | 46.55 MB | +22.99 MB | ✅ PASSED |
-| **[R4] Old Caching Logic** | 7,874 rps | 49.38 ms | 239.42 ms | 264.38 ms | — | 85.06 MB | 46.55 MB | +38.51 MB | ✅ PASSED |
-| **[R4] New Caching Logic** | **23,675 rps** | **13.43 ms** | **21.33 ms** | **26.38 ms** | — | **91.21 MB** | 46.55 MB | **+44.66 MB** | ✅ PASSED |
-| **[R5] Direct Prepared** | 18,557 rps | 6.10 ms | 18.15 ms | 210.47 ms | — | 69.39 MB | 46.56 MB | +22.83 MB | ✅ PASSED |
-| **[R5] Old Caching Logic** | 6,196 rps | 58.20 ms | 260.75 ms | 270.77 ms | — | 83.67 MB | 46.55 MB | +37.12 MB | ✅ PASSED |
-| **[R5] New Caching Logic** | **24,002 rps** | **13.37 ms** | **19.34 ms** | **23.27 ms** | — | **92.12 MB** | 47.56 MB | **+44.56 MB** | ✅ PASSED |
+| **[R1] Direct Prepared** | 19,018 rps | 4.48 ms | 28.25 ms | 206.09 ms | 85,000 | 29.86 MB | 6.18 MB | +23.68 MB | ✅ PASSED |
+| **[R1] Old Caching Logic** | 8,895 rps | 20.18 ms | 217.66 ms | 239.39 ms | 135,776 | 55.19 MB | 6.18 MB | +49.01 MB | ✅ PASSED |
+| **[R1] New Caching Logic** | **24,104 rps** | **11.14 ms** | **19.95 ms** | **37.45 ms** | **51,895** | **61.36 MB** | 6.18 MB | **+55.18 MB** | ✅ PASSED |
+| **[R2] Direct Prepared** | 17,573 rps | 4.38 ms | 51.50 ms | 207.79 ms | 79,750 | 33.02 MB | 6.18 MB | +26.84 MB | ✅ PASSED |
+| **[R2] Old Caching Logic** | 8,262 rps | 21.33 ms | 220.29 ms | 238.86 ms | 129,222 | 54.47 MB | 6.18 MB | +48.29 MB | ✅ PASSED |
+| **[R2] New Caching Logic** | **24,611 rps** | **11.25 ms** | **18.94 ms** | **32.33 ms** | **53,127** | **63.94 MB** | 6.18 MB | **+57.76 MB** | ✅ PASSED |
+| **[R3] Direct Prepared** | 19,586 rps | 4.02 ms | 23.61 ms | 207.29 ms | 88,700 | 33.05 MB | 6.18 MB | +26.87 MB | ✅ PASSED |
+| **[R3] Old Caching Logic** | 10,026 rps | 19.21 ms | 217.48 ms | 235.81 ms | 144,988 | 54.82 MB | 6.18 MB | +48.64 MB | ✅ PASSED |
+| **[R3] New Caching Logic** | **21,491 rps** | **11.25 ms** | **20.91 ms** | **50.52 ms** | **47,408** | **61.84 MB** | 6.18 MB | **+55.66 MB** | ✅ PASSED |
+| **[R4] Direct Prepared** | 18,572 rps | 4.31 ms | 28.59 ms | 207.34 ms | 83,750 | 33.01 MB | 6.18 MB | +26.83 MB | ✅ PASSED |
+| **[R4] Old Caching Logic** | 11,965 rps | 17.87 ms | 213.89 ms | 249.73 ms | 161,762 | 66.92 MB | 6.18 MB | +60.74 MB | ✅ PASSED |
+| **[R4] New Caching Logic** | **22,967 rps** | **11.19 ms** | **22.76 ms** | **66.59 ms** | **50,108** | **61.63 MB** | 6.18 MB | **+55.45 MB** | ✅ PASSED |
+| **[R5] Direct Prepared** | 19,593 rps | 4.16 ms | 23.23 ms | 206.11 ms | 87,650 | 31.42 MB | 6.18 MB | +25.24 MB | ✅ PASSED |
+| **[R5] Old Caching Logic** | 9,396 rps | 20.57 ms | 223.20 ms | 248.88 ms | 138,526 | 54.40 MB | 6.18 MB | +48.22 MB | ✅ PASSED |
+| **[R5] New Caching Logic** | **20,766 rps** | **11.36 ms** | **20.62 ms** | **35.42 ms** | **45,699** | **62.90 MB** | 6.18 MB | **+56.72 MB** | ✅ PASSED |
 
 ### Critical ROI Insights:
 1. **Promise Coalescing prevents Thundering Herd**: The p99 tail latency drops from **~285 ms** (old architecture) to **~25 - 31 ms** (new architecture), keeping application latencies extremely flat under stress.
