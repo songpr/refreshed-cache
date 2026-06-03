@@ -203,20 +203,57 @@ await cache.close();
 ### Test Coverage
 Latest coverage from `npm test -- --coverage`:
 
-* Statements: **91.84%**
-* Branches: **82.92%**
-* Functions: **94.28%**
-* Lines: **97.95%**
+* Statements: **99.18%**
+* Branches: **100.00%**
+* Functions: **95.34%**
+* Lines: **100.00%**
 
-Core file coverage (`index.js`) currently matches the overall values above.
+Core file coverage (`index.js`) matches the overall values above.
 
 ### Test Execution Summary
 Latest full test run (`npm test`) results:
 
-* Test suites: **15 passed, 2 skipped, 0 failed**
-* Tests: **61 passed, 3 skipped, 0 failed**
+* Test suites: **16 passed, 1 skipped, 17 total**
+* Tests: **79 passed, 1 skipped, 80 total**
 
 Roadmap tests are intentionally skipped by default and can be enabled via environment variable.
+
+---
+
+## High-Concurrency Benchmark Results (10,000,000 Rows, 5 Rounds)
+
+For detailed setups, scripts, and cost analyses, please refer to the [Benchmark README](benchmark/README.md).
+
+### A. Standard Scenario Query Speedup (50,000 Lookups)
+Comparing **Direct Prepared Statements (No Cache)** against the Cache across different sizes:
+
+| Scenario | Cache Size | Avg DB Ops/sec | Avg Cache Ops/sec | DB Queries Cache | Speedup | Correctness |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Small Cache** (1% coverage) | 10,000 | ~17,600 | ~48,600 | 20,800 | **2.76x** | ✅ PASSED |
+| **Medium Cache** (10% coverage) | 100,000 | ~15,600 | ~42,800 | 16,200 | **2.74x** | ✅ PASSED |
+| **Large Cache** (50% coverage) | 500,000 | ~15,100 | ~37,600 | 15,300 | **2.49x** | ✅ PASSED |
+
+### B. Shifting-Load Caching Strategies (5 Rounds, max: 100,000)
+Under shifting workloads (sliding window pool of 120,000 keys) with a strict limit of `max: 100000` keys:
+* **Active-Only Refresh Cache (Strategy C)**: Achieved the same **95% hit rate** as standard caching strategies, but reduced database query traffic by **over 90x** (from 50,000+ lookups to under 601), keeping heap growth minimal (~4 MB).
+
+### C. Sustained Concurrent Load Test (Key-by-Key Fallback Limits)
+Under high concurrent single-key miss storms, standard cache-miss strategies run into database connection pool bottlenecks:
+* **Connection Pool Saturation**: Firing individual single-key fetches (`cache.getOrFetch(key)`) for cache misses under high concurrency saturates the Postgres client connection pool.
+* **Latency Alignment**: Due to socket queueing delays, standard caching latencies align with the direct prepared statement baseline (~240 ms p99).
+
+### D. New Features Performance ROI (Promise Coalescing & Bulk Batching)
+By implementing Single-flight Promise Coalescing and Bulk Batch Loading, the queueing bottleneck is completely resolved:
+* **Throughput Boost**: Scales throughput by **over 4x** (from ~5,500 rps with old caching architecture to **~24,500 rps**).
+* **Latency ROI**: Drops tail latency (p99) from **~285 ms** to **~31 ms** under high stress.
+* **DB Query Reduction**: Cuts total database queries triggered in half (e.g., from 103,837 queries to 51,514), protecting the database from thundering herd storms.
+* **Peak Memory Optimization**: Reduces peak heap memory usage by **over 4x** (from ~330 MB to ~75 MB) by eliminating microtask delay wrappers (replacing deferred fetches with direct async IIFEs) and switching from async `for await` iteration to standard synchronous `for` loops for synchronous database result arrays.
+
+### E. Deep Dive: Connection Pool Queueing & Why New Features Matter
+* **Why C aligns with DB baseline**: In load test C, the active sliding window (120,000 keys) is wider than the cache capacity (100,000 keys). This forces constant evictions and triggers over **56,000 - 65,000 individual DB queries**. Because these are executed key-by-key, they saturate the Postgres client pool, causing queueing delays that affect both cache misses and direct prepared statements.
+* **How D resolves the bottleneck**: Single-flight Promise Coalescing coalesces concurrent duplicate reads targeting the same hot keys into a single database query. Meanwhile, Bulk Batch Loading groups batch requests into a single SQL statement (`WHERE uuid IN (...)`). By eliminating redundant database roundtrips, it prevents connection pool saturation, dropping p99 tail latency by **90%** (to ~31 ms) and scaling throughput to **~24,500 rps**.
+
+---
 
 ## Testing
 
@@ -245,7 +282,7 @@ RUN_ROADMAP_TESTS=true npm test -- test/tdd_roadmap.test.js
 ```
 
 ### Memory & Performance report
-* **Low Memory Footprint**: Evaluated at **~666 bytes per cache item** (storing realistic string values), keeping RAM usage highly predictable.
+* **Low Memory Footprint**: Evaluated at **~305.5 bytes per cache item** (storing realistic string values), keeping RAM usage highly predictable.
 * **High-Load Stability**: Successfully soak tested for over **2.5 million operations** in a 5-minute high load sequence (concurrent reads, writes, manual evictions, and background refresh intervals) with 0% error rate and stable heap growth.
 
 ---

@@ -311,7 +311,8 @@ class DataCache {
                 return this._pendingFetches.get(key);
             }
 
-            const fetchPromise = Promise.resolve().then(async () => {
+            let resolvedSync = false;
+            const fetchPromise = (async () => {
                 try {
                     const newValue = this._isAsyncFetchByKey ? await this._fetchByKey(key) : this._fetchByKey(key);
                     if (newValue !== undefined) {
@@ -321,11 +322,14 @@ class DataCache {
                     }
                     return newValue;
                 } finally {
+                    resolvedSync = true;
                     this._pendingFetches.delete(key);
                 }
-            });
+            })();
 
-            this._pendingFetches.set(key, fetchPromise);
+            if (!resolvedSync) {
+                this._pendingFetches.set(key, fetchPromise);
+            }
             return fetchPromise;
         }
     }
@@ -357,14 +361,27 @@ class DataCache {
                 if (actualMissing.length > 0) {
                     const fetchedData = this._isAsyncFetchByKeys ? await this._fetchByKeys(actualMissing) : this._fetchByKeys(actualMissing);
                     if (fetchedData) {
-                        for await (const [k, v] of fetchedData) {
-                            if (v !== undefined) {
-                                this._cache.set(k, v);
-                                if (keys.includes(k)) {
-                                    result[k] = v;
+                        if (typeof fetchedData[Symbol.asyncIterator] === "function") {
+                            for await (const [k, v] of fetchedData) {
+                                if (v !== undefined) {
+                                    this._cache.set(k, v);
+                                    if (keys.includes(k)) {
+                                        result[k] = v;
+                                    }
+                                } else {
+                                    this._missCache.set(k, true);
                                 }
-                            } else {
-                                this._missCache.set(k, true);
+                            }
+                        } else {
+                            for (const [k, v] of fetchedData) {
+                                if (v !== undefined) {
+                                    this._cache.set(k, v);
+                                    if (keys.includes(k)) {
+                                        result[k] = v;
+                                    }
+                                } else {
+                                    this._missCache.set(k, true);
+                                }
                             }
                         }
                     }
