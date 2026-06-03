@@ -287,6 +287,106 @@ RUN_ROADMAP_TESTS=true npm test -- test/tdd_roadmap.test.js
 
 ---
 
+## Effective Production Usage Patterns (v1.8.0 Features)
+
+Version `1.8.0` introduces core architectural upgrades to handle high-concurrency enterprise workloads. By combining Single-flight Promise Coalescing, Bulk Batching, and memory-optimized synchronous fast-paths, the library provides a robust solution for large-scale Node.js applications.
+
+### Pattern A: Thundering Herd Protection (Promise Coalescing)
+If your app experiences spikes of duplicate requests targeting the same hot keys (e.g., flash sales, breaking news), configuring `fetchByKey` automatically coalesces concurrent misses into a single database query.
+
+```javascript
+const Cache = require("refreshed-cache");
+
+const cache = new Cache(
+  async () => [], // Base loader (optional for purely lazy setups)
+  {
+    max: 100000,
+    maxAge: 300,
+    fetchByKey: async (id) => {
+      // Multiple concurrent calls for the same ID will coalesce here.
+      // Only ONE database query is executed; others share the same returned Promise.
+      return await db.query("SELECT * FROM products WHERE id = $1", [id]);
+    }
+  }
+);
+
+// Usage in express router
+app.get("/product/:id", async (req, res) => {
+  const product = await cache.getOrFetch(req.params.id);
+  res.json(product);
+});
+```
+
+### Pattern B: Resolving N+1 Database Queries (Bulk Batch Loading)
+When loading dashboard widgets, lists, or feeds that query multiple related entities, use `fetchByKeys` and `cache.getOrFetchMany(keys)`. This groups all missing keys and fetches them in a single batch statement (e.g. `WHERE id IN (...)`) rather than iterating key-by-key.
+
+```javascript
+const cache = new Cache(
+  async () => [],
+  {
+    max: 100000,
+    maxAge: 300,
+    // Batch fetcher for missing keys
+    fetchByKeys: async (ids) => {
+      // Query database once for all missing keys
+      const rows = await db.query("SELECT id, name FROM users WHERE id = ANY($1)", [ids]);
+      return rows.map(r => [r.id, r]); // Return iterable [key, value] pairs
+    }
+  }
+);
+
+// Usage in express router
+app.get("/users/bulk", async (req, res) => {
+  const userIds = req.query.ids.split(","); // e.g. [1, 5, 8, 12]
+  const users = await cache.getOrFetchMany(userIds);
+  res.json(users);
+});
+```
+
+### Pattern C: Active-Only Memory-Efficient Caching (For Huge Datasets)
+When your database contains millions of records (e.g., 10M or 100M rows), caching the entire dataset in-process is impossible. Use the **Active-Only Refresh** strategy. It regularly refreshes only the keys that have been read since the last refresh interval, keeping the hot set warm while bounding memory usage.
+
+```javascript
+const cache = new Cache(
+  async (recentKeys) => {
+    // recentKeys lists only keys accessed since the last refresh cycle
+    if (!recentKeys || recentKeys.length === 0) return [];
+    
+    const rows = await db.query("SELECT id, data FROM profiles WHERE id = ANY($1)", [recentKeys]);
+    return rows.map(r => [r.id, r.data]);
+  },
+  {
+    max: 100000,
+    maxAge: 600,
+    refreshAge: 300,
+    resetOnRefresh: false,            // Keep existing unexpired items
+    passRecentKeysOnRefresh: true     // Pass active keys list to the loader function
+  }
+);
+```
+
+### Pattern D: Safeguarding against Cache Penetration (Hard Miss Protection)
+When clients query non-existent keys (e.g. `product-non-existent-999`), a cache miss normally forces a database query. A flood of non-existent queries can take down your database (Cache Penetration Attack). 
+
+Configure `maxMiss` and `maxAgeMiss` to track non-existent keys in a separate bounded miss-cache, preventing database lookup spam.
+
+```javascript
+const cache = new Cache(
+  async () => [],
+  {
+    max: 100000,
+    fetchByKey: async (sku) => {
+      const item = await db.query("SELECT * FROM items WHERE sku = $1", [sku]);
+      return item || undefined; // Returning undefined puts the key into the miss cache
+    },
+    maxMiss: 10000,      // Bounded tracking for non-existent SKUs
+    maxAgeMiss: 60       // Lock out non-existent keys for 60 seconds
+  }
+);
+```
+
+---
+
 ## Roadmap & Future Development
 
 For detailed performance comparison benchmarks, database prepared statements analysis, and the future development plan, please refer to [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md).
