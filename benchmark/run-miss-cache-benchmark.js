@@ -2,20 +2,49 @@ const postgres = require('postgres');
 const DataCache = require('../index.js');
 const { sleep, measureMemory, percentiles } = require('./lib/bench-utils');
 const { getArg, isChild, emitResult, orchestrate } = require('./lib/isolated-runner');
+const { makeBogusPool, selectKey, validateAttackConfig } = require('./lib/miss-cache-workload');
 
 // Measures the DB-query reduction from miss-cache (Pattern D: Cache Penetration Protection).
 //
-// Workload: a fixed pool of 5,000 bogus keys (non-existent in DB) is repeatedly requested
-// alongside 95% valid-key traffic. Without miss-cache, every bogus lookup fires a DB query.
-// With miss-cache enabled, the second and subsequent lookups for each bogus key are absorbed
-// in memory — zero DB queries.
+// Workload (cache-penetration ATTACK): a fixed pool of bogus keys (non-existent in DB) is
+// hammered alongside valid traffic. The bogus pool is deliberately small relative to the
+// number of bogus requests, so each bogus key is requested many times — this is what gives
+// miss-cache something to absorb. The valid set is PRE-WARMED before measurement so valid
+// lookups are pure cache hits and the miss-cache signal is not drowned by ordinary warmup.
 //
-// Two strategies are compared:
+// Without miss-cache (maxMiss: 0) every bogus lookup fires a DB query. With miss-cache
+// enabled, only the first lookup per bogus key hits the DB; the rest are absorbed in memory.
+//
+// Knobs (all overridable via --flag=value):
+//   --bogusRatio=0.5   fraction of requests targeting non-existent keys (attack intensity)
+//   --bogusPool=1000   number of distinct bogus keys
+//   --validPool=10000  number of valid keys (pre-warmed before measurement)
+//   --duration=30      measured seconds per strategy
+//
+// Strategies compared:
+//   "direct"         — no cache, every request hits the DB (baseline)
 //   "no-miss-cache"  — maxMiss: 0 (disabled, every hard miss hits the DB)
 //   "miss-cache"     — maxMiss: 10000, maxAgeMiss: 60 (absorbs repeat bogus lookups)
 
-const TOTAL_DURATION_SEC = parseInt(getArg('duration', '30'), 10);
-const BOGUS_POOL_SIZE = 5000;
+const TOTAL_DURATION_SEC = parseInt(getArg('duration', '60'), 10);
+const BOGUS_POOL_SIZE = parseInt(getArg('bogusPool', '1000'), 10);
+const BOGUS_RATIO = parseFloat(getArg('bogusRatio', '0.5'));
+const VALID_POOL_SIZE = parseInt(getArg('validPool', '10000'), 10);
+const MAX_AGE_MISS = parseInt(getArg('maxAgeMiss', '20'), 10);
+
+// Workers are rate-limited to ~2000 rps total (4 workers x 500 qps); use that to estimate
+// total request volume and reject workloads where bogus lookups can't repeat (see module).
+const EST_TOTAL_REQUESTS = 2000 * TOTAL_DURATION_SEC;
+
+// Guard: the run duration must exceed 2× the miss-cache TTL so expiry+refill cycles are observed.
+// Without this, zero-query plateaus are artifacts of the run ending before TTL fires.
+if (TOTAL_DURATION_SEC < 2 * MAX_AGE_MISS) {
+    throw new Error(
+        `Duration ${TOTAL_DURATION_SEC}s < 2 × maxAgeMiss ${MAX_AGE_MISS}s. ` +
+        `Increase duration to see full miss-cache lifecycle (fill → absorb → expire → refill cycles). ` +
+        `Or shrink maxAgeMiss. Recommended: duration ≥ ${2 * MAX_AGE_MISS}s.`
+    );
+}
 
 const connectionString = 'postgres://benchmark_user:benchmark_password@localhost:5439/benchmark_db';
 const sql = postgres(connectionString, { max: 50 });
@@ -28,7 +57,7 @@ const STRATEGIES = [
     },
     {
         key: 'no-miss-cache',
-        label: 'Cache — Miss Protection Disabled (maxMiss: 0)',
+        label: `Cache — Miss Protection Disabled (maxMiss: 0)`,
         setup: async (trackedSql) => {
             const cache = new DataCache(
                 async () => [],
@@ -50,7 +79,7 @@ const STRATEGIES = [
     },
     {
         key: 'miss-cache',
-        label: 'Cache — Miss Protection Enabled (maxMiss: 10000, maxAgeMiss: 60)',
+        label: `Cache — Miss Protection Enabled (maxMiss: 10000, maxAgeMiss: ${MAX_AGE_MISS})`,
         setup: async (trackedSql) => {
             const cache = new DataCache(
                 async () => [],
@@ -60,7 +89,7 @@ const STRATEGIES = [
                     refreshAge: 300,
                     resetOnRefresh: false,
                     maxMiss: 10000,
-                    maxAgeMiss: 60,
+                    maxAgeMiss: MAX_AGE_MISS,
                     fetchByKey: async (key) => {
                         const [row] = await trackedSql`SELECT uuid, name FROM users WHERE uuid = ${key}`;
                         return row || undefined;
@@ -74,9 +103,16 @@ const STRATEGIES = [
 ];
 
 async function runBenchmarkStrategy(name, setupCacheFn) {
+    const guard = validateAttackConfig({
+        totalRequests: EST_TOTAL_REQUESTS,
+        bogusRatio: BOGUS_RATIO,
+        bogusPool: BOGUS_POOL_SIZE,
+    });
+    if (!guard.ok) throw new Error(`Invalid miss-cache workload — ${guard.message}`);
+
     console.log(`\n======================================================`);
     console.log(`RUNNING STRATEGY: ${name}`);
-    console.log(`Duration: ${TOTAL_DURATION_SEC}s | Bogus pool: ${BOGUS_POOL_SIZE} keys`);
+    console.log(`Duration: ${TOTAL_DURATION_SEC}s | Bogus: ${(BOGUS_RATIO * 100).toFixed(0)}% over ${BOGUS_POOL_SIZE} keys (${guard.repeatFactor.toFixed(1)}x repeats) | Valid pool: ${VALID_POOL_SIZE}`);
     console.log(`======================================================`);
 
     const baseMem = await measureMemory();
@@ -94,12 +130,24 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
 
     const cache = await setupCacheFn(trackedSql);
 
-    // Fetch 50,000 real UUIDs and build a fixed pool of bogus keys.
-    const allRows = await sql`SELECT uuid FROM users LIMIT 50000`;
+    // Fetch the valid key pool and build a fixed pool of bogus keys.
+    const allRows = await sql`SELECT uuid FROM users LIMIT ${VALID_POOL_SIZE}`;
     const validUuids = allRows.map(r => r.uuid);
-    const bogusKeys = Array.from({ length: BOGUS_POOL_SIZE }, (_, i) => `bogus-key-${i}`);
+    const bogusKeys = makeBogusPool(BOGUS_POOL_SIZE);
 
     if (validUuids.length === 0) throw new Error('Database empty — run seed.js first.');
+
+    // Pre-warm the valid set so valid lookups are pure cache hits during measurement.
+    // This isolates the miss-cache signal from ordinary cache warmup. DB queries spent
+    // here are reset out below so they don't count against the measured window.
+    if (cache) {
+        const batch = 200;
+        for (let i = 0; i < validUuids.length; i += batch) {
+            await Promise.all(validUuids.slice(i, i + batch).map(k => cache.getOrFetch(k)));
+        }
+        dbQueryCount = 0;
+        totalDBQueries = 0;
+    }
 
     const startTime = Date.now();
     let totalRequests = 0;
@@ -120,12 +168,13 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
             const promises = Array.from({ length: batchSize }, async () => {
                 const qStart = process.hrtime.bigint();
 
-                // Traffic mix: 5% bogus (penetration attack pattern — always same bounded pool),
-                // 95% valid keys.
-                const isBogus = Math.random() < 0.05;
-                const key = isBogus
-                    ? bogusKeys[Math.floor(Math.random() * bogusKeys.length)]
-                    : validUuids[Math.floor(Math.random() * validUuids.length)];
+                // Attack traffic mix: BOGUS_RATIO of requests target the bounded bogus pool
+                // (repeated penetration attempts), the rest hit the pre-warmed valid set.
+                const { key } = selectKey(Math.random, {
+                    validKeys: validUuids,
+                    bogusKeys,
+                    bogusRatio: BOGUS_RATIO,
+                });
 
                 if (cache) {
                     await cache.getOrFetch(key);
@@ -229,7 +278,7 @@ async function main() {
 
     console.log(`\n======================================================`);
     console.log(`MISS CACHE BENCHMARK (${rounds} ROUNDS, process-isolated)`);
-    console.log(`Bogus key pool: ${BOGUS_POOL_SIZE} fixed keys | 5% bogus traffic`);
+    console.log(`Attack: ${(BOGUS_RATIO * 100).toFixed(0)}% bogus traffic over ${BOGUS_POOL_SIZE} fixed keys | Valid pool: ${VALID_POOL_SIZE} (pre-warmed)`);
     console.log(`======================================================`);
     console.table(results.map(r => ({
         'Strategy': r.name,

@@ -36,7 +36,8 @@ The database is populated with **10,000,000** records generated via a fast SQL g
 - `run-long-benchmark.js`: Simulates caching strategies over multiple intervals, verifying memory limits and garbage collection behavior.
 - `run-load-test.js`: Sustained concurrent user load test comparing local caching against Direct Prepared Statements (No Cache).
 - `run-new-features-benchmark.js`: Evaluates performance ROI of Single-flight Promise Coalescing and Bulk Batch Loading.
-- `run-miss-cache-benchmark.js`: Measures DB query reduction from miss-cache (Pattern D). Compares `maxMiss: 0` (disabled) vs `maxMiss: 10000` under 5% bogus-key penetration traffic.
+- `run-miss-cache-benchmark.js`: Measures DB query reduction from miss-cache (Pattern D). Compares Direct (no cache), `maxMiss: 0` (disabled), and `maxMiss: 10000` under a cache-penetration **attack** — a high share of repeated bogus-key traffic against a small bounded pool, with the valid set pre-warmed. Workload shape is configurable via `--bogusRatio`, `--bogusPool`, `--validPool`.
+- `lib/miss-cache-workload.js`: Shared, unit-tested workload generator for the miss-cache benchmark (`makeBogusPool`, `selectKey`, `validateAttackConfig`). `validateAttackConfig` rejects workloads where bogus traffic can't repeat often enough to exercise miss-cache. Covered by `test/miss-cache-workload.test.js`.
 
 ---
 
@@ -91,8 +92,18 @@ node benchmark/run-load-test.js --rounds=5 --duration=30
 # 4. New Features Benchmark (5 rounds, 30s duration)
 node benchmark/run-new-features-benchmark.js --rounds=5 --duration=30
 
-# 5. Miss Cache Benchmark (5 rounds, 30s duration)
-node benchmark/run-miss-cache-benchmark.js --rounds=5 --duration=30
+# 5. Miss Cache Benchmark (5 rounds, 60s duration with TTL cycling)
+node benchmark/run-miss-cache-benchmark.js --rounds=5
+
+# 5b. Miss Cache Benchmark — custom attack shape (e.g. heavier attack, smaller pool, different TTL)
+node benchmark/run-miss-cache-benchmark.js --rounds=5 --bogusRatio=0.7 --bogusPool=500 --validPool=10000 --maxAgeMiss=30
+```
+
+> **Miss-cache workload & lifecycle note:** the benchmark models a cache-penetration **attack** and captures the full **expiry+refill lifecycle**. The bogus pool must be small relative to the volume of bogus requests, otherwise each bogus key is seen at most once and miss-cache has nothing to absorb. `validateAttackConfig` enforces this: it estimates total request volume (~2,000 rps × duration) and aborts if expected bogus requests don't exceed the bogus pool by at least 3×. Duration must exceed 2× `maxAgeMiss` so expiry and refill cycles are observed (guard enforced at runtime). The valid set is **pre-warmed** before measurement so valid lookups are pure cache hits and don't mask the miss-cache signal. Default: `duration=60s`, `maxAgeMiss=20s` (production typically uses 60s, but 20s here fits 3 cycles in the run).
+
+### Run the benchmark workload unit tests
+```bash
+npx jest test/miss-cache-workload.test.js
 ```
 
 ---
@@ -205,6 +216,34 @@ Compares `New Caching Logic` (Single-flight Promise Coalescing and Batch Loading
 ### Critical ROI Insights:
 1. **Promise Coalescing prevents Thundering Herd**: The p99 tail latency drops from **~240 ms** (old logic) to **~35–67 ms** (new logic), keeping application latencies flat under stress.
 2. **Throughput Boost**: By grouping missing keys and executing bulk fetches, the throughput improves by **2.3–2.7x** (~22–25k rps vs ~9–12k rps) and DB query volume drops by ~63% (~50k vs ~135k queries).
+
+---
+
+### E. Cache-Penetration Attack Protection (Miss-Cache, 5 Rounds, 60s with TTL Cycling)
+
+Models a cache-penetration **attack**: 50% of traffic hammers a fixed pool of **1,000 non-existent keys** while the valid set (10,000 keys) is **pre-warmed** so valid lookups are pure cache hits — isolating the miss-cache effect. Duration is 60s with `maxAgeMiss: 20s`, so miss-cache entries expire ~3 times per run, showing the **refill lifecycle**. Run with `node benchmark/run-miss-cache-benchmark.js --rounds=5`. Results from process-isolated harness.
+
+| Round | Strategy | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | DB Queries | Peak Heap | Base Heap | Heap Growth |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **R1** | Direct Prepared (No Cache) | 1,883 rps | 9.16 ms | 17.16 ms | 113.78 ms | 113,400 | 8.55 MB | 5.81 MB | +2.74 MB |
+| **R1** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,972 rps | 0.69 ms | 8.05 ms | 11.02 ms | 57,078 | 13.17 MB | 5.81 MB | +7.36 MB |
+| **R1** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,027 rps | **0.08 ms** | **0.15 ms** | **0.20 ms** | **3,070** | 13.27 MB | 5.81 MB | +7.46 MB |
+| **R2** | Direct Prepared (No Cache) | 1,842 rps | 8.78 ms | 16.99 ms | 111.38 ms | 111,100 | 8.57 MB | 5.81 MB | +2.76 MB |
+| **R2** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,957 rps | 1.03 ms | 8.60 ms | 19.70 ms | 56,751 | 13.28 MB | 5.81 MB | +7.47 MB |
+| **R2** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,023 rps | **0.06 ms** | **0.14 ms** | **0.18 ms** | **3,062** | 13.35 MB | 5.81 MB | +7.54 MB |
+| **R3** | Direct Prepared (No Cache) | 1,836 rps | 9.69 ms | 104.00 ms | 211.98 ms | 110,550 | 8.21 MB | 5.81 MB | +2.40 MB |
+| **R3** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,964 rps | 1.43 ms | 8.23 ms | 10.36 ms | 57,366 | 13.17 MB | 5.81 MB | +7.36 MB |
+| **R3** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,026 rps | **0.07 ms** | **0.15 ms** | **0.19 ms** | **3,067** | 13.27 MB | 5.81 MB | +7.46 MB |
+| **R4** | Direct Prepared (No Cache) | 1,937 rps | 7.78 ms | 16.80 ms | 109.92 ms | 116,750 | 8.39 MB | 5.81 MB | +2.58 MB |
+| **R4** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,957 rps | 0.51 ms | 7.46 ms | 14.29 ms | 56,897 | 13.42 MB | 5.81 MB | +7.61 MB |
+| **R4** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,025 rps | **0.08 ms** | **0.15 ms** | **0.19 ms** | **3,066** | 13.27 MB | 5.81 MB | +7.46 MB |
+| **R5** | Direct Prepared (No Cache) | 1,865 rps | 7.92 ms | 17.34 ms | 105.11 ms | 112,450 | 8.43 MB | 5.81 MB | +2.62 MB |
+| **R5** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,948 rps | 2.47 ms | 8.63 ms | 11.40 ms | 56,309 | 13.21 MB | 5.81 MB | +7.40 MB |
+| **R5** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,027 rps | **0.08 ms** | **0.15 ms** | **0.21 ms** | **3,058** | 13.27 MB | 5.81 MB | +7.46 MB |
+
+**Key Takeaway**: Over 60 seconds with `maxAgeMiss: 20`, miss-cache exhibits the **full lifecycle**: misses are cached, entries expire after 20s, and are refetched — total ~3,060–3,070 DB queries per round (~1,000 per 20s window), versus ~56–57k for `maxMiss: 0` (disabled) and ~110–116k for no cache. This **~95% reduction** proves the production claim: under indefinite attack, miss-cache **bounds** DB load to ~pool-size per TTL interval, not "zero forever" (which was an artifact of earlier 30s runs expiring nothing). p99 latency stays **~0.2 ms** (pure in-process), ~10–20 ms worse with `maxMiss: 0`, and ~110–210 ms worse uncached. Miss-cache costs ~7.5 MB bounded extra heap.
+
+> **Workload & lifecycle integrity:** the script enforces `duration ≥ 2 × maxAgeMiss` so expiry+refill cycles are observed (guard rejects duration=30, maxAgeMiss=60, which would show only fill/absorb without refill). The bogus pool is validated small enough that bogus requests repeat heavily (≥3× per pool entry). See `test/miss-cache-workload.test.js` for regression tests. Default `maxAgeMiss: 20` is for demo (production uses 60, but 20 fits 3 cycles in one 60s benchmark run).
 
 ---
 
@@ -364,7 +403,7 @@ app.get("/config/:id", (req, res) => {
 ```
 
 ### Pattern D: Safeguarding against Cache Penetration (Hard Miss Protection)
-**Benchmark backing:** `benchmark/run-miss-cache-benchmark.js` (§E, run separately). The benchmark fires 5% bogus-key traffic against a fixed pool of 5,000 non-existent keys alongside 95% valid traffic over 30 seconds. With `maxMiss: 0` (disabled), each of the repeated bogus lookups triggers a fresh DB query. With `maxMiss: 10000, maxAgeMiss: 60`, the second and subsequent lookups for each bogus key are absorbed in the in-process miss-cache — **cutting bogus-key DB queries to near zero** after the first lookup per key, reducing overall DB query volume proportionally to the bogus-traffic fraction.
+**Benchmark backing:** §5E (`benchmark/run-miss-cache-benchmark.js`). The benchmark models a cache-penetration **attack**: 50% of traffic hammers a fixed pool of 1,000 non-existent keys (with the valid set pre-warmed) over 60 seconds with `maxAgeMiss: 20`. With `maxMiss: 0` (disabled), every bogus lookup triggers a fresh DB query (~57k total). With `maxMiss: 10000, maxAgeMiss: 20`, bogus entries expire after 20s, so the pattern shows **refill cycles**: ~1,000 queries per 20-second window (at expiry boundaries), near-zero in between. This proves the production claim: under indefinite attack, miss-cache **bounds** DB load to ~pool-size per TTL interval, rather than querying every time. p99 latency with miss-cache stays at ~0.2 ms (pure in-process), versus ~10–14 ms with `maxMiss: 0` and ~100–210 ms with no cache.
 
 **`maxMiss: 0` explicitly disables miss-cache** (honors the documented semantics — repeated non-existent keys always hit the DB). Default is 2000 when `fetchByKey` or `fetchByKeys` is configured.
 
