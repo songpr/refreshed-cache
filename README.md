@@ -285,6 +285,12 @@ RUN_ROADMAP_TESTS=true npm test -- test/tdd_roadmap.test.js
 * **Low Memory Footprint**: Evaluated at **~305.5 bytes per cache item** (storing realistic string values), keeping RAM usage highly predictable.
 * **High-Load Stability**: Successfully soak tested for over **2.5 million operations** in a 5-minute high load sequence (concurrent reads, writes, manual evictions, and background refresh intervals) with 0% error rate and stable heap growth.
 
+## Breaking Changes in v1.8.0
+
+To clean up deprecated, duplicate, and sub-optimal methods in the cache API, version `1.8.0` removes the following methods:
+1. **`del(key)` (Alias Removed)**: Use the standard **`delete(key)`** method instead.
+2. **`find(findFunction)` (Linear Lookup Removed)**: Linear $O(N)$ searches over in-memory caches bypass the speed advantages of LRU maps and introduce performance overhead. If you need to search cached items, iterate via the native generator **`cache.entries()`** instead.
+
 ---
 
 ## Effective Production Usage Patterns (v1.8.0 Features)

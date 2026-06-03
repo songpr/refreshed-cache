@@ -115,10 +115,8 @@ export class DataCache<K, V> {
   get(key: K): V | undefined;
   set(key: K, value: V): void;
   delete(key: K): void;
-  del(key: K): void;
   clear(): void;
   entries(): Generator<[K, V], void, unknown>;
-  find(findFunction: (value: V, key: K, cache: DataCache<K, V>) => boolean): V | undefined;
   asyncRefresh(): Promise<void>;
   getOrFetch(key: K): Promise<V | undefined>;
   has(key: K): boolean;

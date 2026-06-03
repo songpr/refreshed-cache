@@ -1,33 +1,86 @@
-# Refreshed Cache - Development Plan & Roadmap
+# Refreshed Cache — Development Plan & Roadmap
 
-Based on the performance benchmarks and real-world high-concurrency simulation results, this document outlines the future development plan and roadmap for `refreshed-cache`.
-
----
-
-## 1. Why `refreshed-cache` is Worth Developing Over Raw `lru-cache`
-
-Raw `lru-cache` is a passive, in-memory data store with eviction policies. Using it in high-concurrency production systems introduces key challenges that `refreshed-cache` solves:
-- **Zero Cache-Miss Penalty (UX)**: Instead of users waiting for a database fetch on cache misses (which can take 200ms+ under load), background refreshing keeps the hot working set fresh, providing `<0.1ms` read latencies.
-- **Cache Stampede Protection**: Rather than concurrent requests hammering the database simultaneously on expiration, `refreshed-cache` manages the refresh lifecycle on a single loop.
-- **Data Provider Encapsulation**: It keeps the data-fetching logic (`fetchFn`, `fetchByKey`) close to the cache configuration.
+This document reflects the **actual implemented state** of `refreshed-cache` (`index.js`, v1.8.0) and sets a deliberately scoped roadmap. It supersedes the earlier draft, which listed already-shipped features as "future work."
 
 ---
 
-## 2. Roadmap & Core Features to Build
+## 0. Current State (Reality Check)
 
-We have identified three critical directions for future development to make `refreshed-cache` a production-grade, highly resilient library:
+| Capability | Status | Where |
+| :--- | :--- | :--- |
+| LRU + TTL store (wraps `lru-cache` v11) | ✅ Shipped | `index.js:64` |
+| Scheduled **full refresh** on interval (`refreshAge`) | ✅ Shipped | `_timeoutLoop`, `asyncRefresh` |
+| Scheduled refresh **at time-of-day** (`refreshAt`, every 1–14 days) | ✅ Shipped | `_refreshAtLoop` |
+| `passRecentKeysOnRefresh` (refresh only the hot working set) | ✅ Shipped | `init` / `asyncRefresh` |
+| Negative cache for misses (`fetchByKey` + `maxMiss`/`maxAgeMiss`) | ✅ Shipped | `getOrFetch` |
+| **Promise coalescing / single-flight** | ✅ Shipped | `getOrFetch`, `_pendingFetches` |
+| **Batch loading on miss** (`getOrFetchMany` + `fetchByKeys`) | ✅ Shipped | `getOrFetchMany:343` |
+| `set` / `get` / `delete` / `clear` / `has` / `entries` | ✅ Shipped | — |
+| Test suite (~150 tests across 18 files) | ✅ Shipped | `test/` |
 
-### A. Promise Coalescing / Single-flight (High Priority)
-- **Problem**: When a cache miss occurs under high concurrency, multiple queries are fired to the database for the same key before the first fetch resolves.
-- **Solution**: Track active fetch requests inside a mapping (`_pendingFetches`). If a fetch for `key` is already in progress, subsequent concurrent reads will resolve to the same pending promise instead of triggering new database queries.
+> ⚠️ **Highest-ROI action, costs one command:** npm `latest` is **1.5.3**; this repo is at **1.8.0**. The coalescing and batch features are built but **unpublished**. `npm publish` first; everything else is secondary.
 
-### B. Batch loading on Miss (`getOrFetchMany`)
-- **Problem**: Querying multiple entities (e.g., retrieving a list of users) currently triggers separate single-key lookups. If multiple keys miss, it causes $N$ database calls.
-- **Solution**: Implement `cache.getOrFetchMany(keys)` to group all missed keys and fetch them using a single batch query (e.g. `WHERE id IN (...)`) rather than individual calls.
+---
 
-### C. Distributed Cache Invalidation Hooks (Pub/Sub & Webhooks)
-- **Problem**: When scaling Node.js applications horizontally across multiple app nodes/containers, caches can become out-of-sync when writes happen on different nodes.
-- **Solution**: Expose lightweight lifecycle hooks and listener interfaces to trigger `cache.asyncRefresh()` or `cache.delete(key)` remotely (via Pub/Sub or Webhooks) to keep distributed in-process caches synchronized.
-- **Modern Node.js 24/26 Integration**:
-  - **Zero-Dependency HTTP Invalidation**: Leverage Node's new built-in `fetch()` (powered by **Undici v7/v8**) to broadcast HTTP invalidation requests to peer containers. The native connection pooling and smarter load balancing in Undici 8 will speed up webhook invalidations by up to 30% without requiring external HTTP clients (like `axios`).
-  - **Native WebSockets Sync**: Use Node's stable native WebSockets client (WHATWG standard) to connect to a centralized cache-sync server. This eliminates the need for heavy external npm dependencies like `ws`, keeping the cache library extremely lightweight and memory-efficient.
+## 1. Strategic Positioning: Why Not Just Use Raw `lru-cache`?
+
+This is the question every evaluator asks, and the README must answer it in one paragraph. The honest answer determines the library's future.
+
+### The real differentiator: refresh is **push-based and scheduled**, not pull-based and lazy.
+
+`lru-cache`'s `fetchMethod` + `allowStale` is **pull-based**: an entry is only refreshed when *a request happens to hit it* after it goes stale. The *first* requester after expiry still pays the backend latency (stale-while-revalidate serves them stale data, not fresh). Refresh work is coupled to, and triggered by, request traffic.
+
+`refreshed-cache` is **push-based**: `asyncRefresh()` re-fetches the entire working set on a timer (`refreshAge`) or at a wall-clock time (`refreshAt`), *independent of request traffic*. Consequences that raw `lru-cache` cannot replicate without you building it:
+
+1. **Zero cache-miss penalty on hot data.** The working set is already fresh before requests arrive — reads stay `<0.1 ms` with no per-key revalidation stall.
+2. **Bounded, predictable backend load.** With `passRecentKeysOnRefresh` + "active-only" refresh, the entire hot set is refreshed in a handful of queries per interval (benchmark §5.B: ~601 queries vs. ~51,000 for lazy), regardless of read QPS. Backend load is a function of *cache size and interval*, not *traffic*.
+3. **Time-aligned freshness.** `refreshAt: {days, at}` supports "rebuild the cache at 02:00 daily" — a first-class need for reference data, pricing tables, feature flags, config — that `lru-cache` has no concept of.
+4. **Encapsulated data provider.** Fetch logic (`fetch`, `fetchByKey`, `fetchByKeys`) lives with the cache config, not scattered across call sites.
+
+### Be honest about what is *not* a differentiator.
+
+- **Single-flight coalescing** is also provided by `lru-cache`'s own `fetch()` (it dedupes concurrent in-flight fetches per key). Our `getOrFetch` reimplements it on top of `get` + `fetchByKey`. Keep it — but don't market it as unique.
+- **Batch loading** overlaps conceptually with `dataloader`. Our edge is that it shares the same store and miss-cache as the rest of the API, not that batching itself is novel.
+
+### Positioning sentence (for the README):
+
+> **`refreshed-cache` is for read-heavy workloads over a bounded, slowly-changing dataset (reference/config/catalog data) where you want the hot set kept fresh *proactively on a schedule* — so no request ever pays refresh latency — rather than lazily revalidated on access like raw `lru-cache`.**
+
+If a use case doesn't match that sentence, the honest recommendation is raw `lru-cache` (`fetchMethod` + `allowStale`). Owning a narrow, correct niche beats pretending to be a general cache.
+
+---
+
+## 2. Roadmap (Scoped)
+
+### Tier 1 — Finish what exists (do now, low cost, high credibility)
+- **Publish 1.8.0** to npm.
+- **Document `getOrFetch`, `getOrFetchMany`, single-flight, and the miss cache** in the README (they exist in code but not in the published docs).
+- **Add the "why not raw lru-cache" section** (above) verbatim to the README.
+- **Fix the benchmark harness** (see `benchmark/README.md` audit) so the numbers are defensible, then lead with the single strongest chart: equal hit-rate at ~90× fewer backend queries.
+- **TypeScript types** (`index.d.ts`). Cheap, and a hard adoption blocker for many teams today.
+
+### Tier 2 — Sharpen the core (optional, medium cost)
+- **Observability hooks**: expose counters for hits/misses/refreshes/coalesced-fetches and an `onRefresh`/`onError` callback. Right now refresh errors only `console.error` (`index.js:91`); production users need a hook.
+- **Per-refresh error backoff**: on repeated `asyncRefresh` failure, back off instead of retrying every interval at full rate.
+- **`getOrFetchMany` single-flight**: the batch path does not yet coalesce overlapping concurrent batches the way `getOrFetch` does for single keys.
+
+### Tier 3 — Distributed invalidation (DEFERRED / likely cut)
+The previous plan proposed Pub/Sub + native-`fetch`/WebSocket cache sync across nodes. **Recommendation: cut, or keep as a documented integration pattern only — do not build it into the library.**
+
+Rationale:
+- It changes the product from "an in-process cache" to "a distributed-systems component," with correctness obligations (ordering, partition behavior, delivery guarantees) that are a team-scale, ongoing commitment for a solo maintainer.
+- It competes directly with Redis pub/sub, Momento, and existing invalidation libraries — on their turf.
+- The earlier justification ("Undici 8 is ~30% faster", "native WebSockets avoid the `ws` dependency") is transport trivia; invalidation *correctness*, not transport speed, is the hard and risky part.
+- The existing `delete(key)` / `clear()` / `asyncRefresh()` surface is already enough for users to wire their own invalidation to whatever message bus they run. **Ship a recipe, not a subsystem.**
+
+If distributed sync is ever pursued, gate it behind real demand (issues/users asking) and ship it as a **separate optional package** (`refreshed-cache-sync`) so the core stays zero-config and single-dependency.
+
+---
+
+## 3. Investment Guidance (ROI)
+
+- **Portfolio / internal-tool goal** → do Tier 1 only. The library is a strong, finished showcase of real backend engineering; stop there.
+- **OSS-adoption goal** → Tier 1 is mandatory and probably sufficient to test demand. Add Tier 2 only if adoption appears.
+- **"Product" goal (Tier 3)** → not advised for a solo maintainer; negative expected ROI against incumbents.
+
+Decision gate before any Tier 2/3 work: **does published-1.8.0 + honest docs attract real users?** Let that answer, not the roadmap, drive further investment.
