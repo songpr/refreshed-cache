@@ -51,6 +51,29 @@ docker compose -f benchmark/docker-compose.yml up -d
 npm install
 ```
 
+### Seed the Database
+Before running the benchmarks, the database needs to be seeded with records. You have two options:
+
+#### Option A: Fast SQL Seeding (Recommended for 10,000,000 Rows)
+Run a native Postgres `generate_series` script inside the Docker container. This generates exactly 10,000,000 records with realistic formats in less than 30 seconds:
+```bash
+docker exec -i refreshed-cache-benchmark-postgres psql -U benchmark_user -d benchmark_db -c "
+INSERT INTO users (uuid, name, email, metadata)
+SELECT 
+    gen_random_uuid()::varchar,
+    'User ' || i,
+    'user' || i || '@example.com',
+    jsonb_build_object('city', 'City ' || (i % 100), 'company', 'Company ' || (i % 10), 'role', 'Role ' || (i % 5))
+FROM generate_series(1, 10000000) AS i;
+"
+```
+
+#### Option B: Node.js Seeding (For 1,000,000 Faker Rows)
+Run the Node.js seeding script which uses `@faker-js/faker` to insert 1,000,000 mock records:
+```bash
+node benchmark/seed.js
+```
+
 ### Run Benchmarks (with Optional `--rounds=N` and `--duration=S` args)
 Each script can be run with `--rounds` (default: 1) and `--duration` (for load simulations, in seconds) to gather comprehensive data.
 
@@ -72,7 +95,20 @@ node benchmark/run-new-features-benchmark.js --rounds=5 --duration=30
 
 ## 5. Benchmark Results (10,000,000 Total DB Rows)
 
+> ⚠️ **STALE — pending re-run.** All numbers in §5 were produced by the **old single-process harness** and exhibit the artifacts documented in §8 (round-over-round throughput decay, negative memory deltas, sub-millisecond latencies below `Date.now()` resolution). They are retained only for reference. The harness has since been rewritten for **process isolation** (`benchmark/lib/isolated-runner.js`) — each `(round, strategy)` runs in its own forked process with a fresh pool and heap, `--expose-gc` quiesced memory, `hrtime` timing, and a `DB Queries` column on every table. **Regenerate before citing:**
+>
+> ```bash
+> docker compose -f benchmark/docker-compose.yml up -d   # ensure DB is up + seeded
+> node benchmark/run-benchmark.js --rounds=5
+> node benchmark/run-long-benchmark.js --rounds=5 --duration=30
+> node benchmark/run-load-test.js --rounds=5 --duration=30
+> node benchmark/run-new-features-benchmark.js --rounds=5 --duration=30
+> ```
+>
+> After re-running, expect the round-to-round swings and negative deltas to disappear — that disappearance is the validation. The one figure that survives the old harness unchanged is the **query-count** reduction in §B (≈601 vs ≈51,000 at equal hit rate); query counts are exact integers, immune to timing/GC noise.
+
 ### A. Standard Scenario Throughput (50,000 Lookups, 5-Rounds Run)
+*(stale — see banner above)*
 Simulates 50,000 read queries with a realistic traffic distribution of 70% cache hits, 25% cache misses (exist in DB), and 5% hard misses.
 
 *Direct Prepared Statements (No Cache) are compared directly against the Cache as a baseline.*
@@ -98,6 +134,8 @@ Simulates 50,000 read queries with a realistic traffic distribution of 70% cache
 ---
 
 ### B. Long-Running Strategy Simulation (5 Rounds, max: 100,000)
+*(stale — see banner above; the `DB Queries` column here is the one figure that survives the harness change unchanged)*
+
 Evaluates strategies under a shifting hot key load (sliding window) using a strict limit of `max: 100000` keys to test process RAM safety and GC leaks:
 
 | Strategy | Hit Rate | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | DB Queries | Peak Heap | Base Heap | Heap Growth | Cleaned Heap | Correctness |
@@ -128,48 +166,54 @@ Evaluates strategies under a shifting hot key load (sliding window) using a stri
 ---
 
 ### C. Sustained High-Concurrency Load Test (5 Rounds, max: 100,000)
-Compares in-process cache lookups against direct Postgres querying via optimized Prepared Statements under concurrent traffic:
+Compares in-process cache lookups against direct Postgres querying via optimized Prepared Statements under concurrent traffic.
 
-| Round | Strategy | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | Hit Rate | Peak Heap | Base Heap | Heap Growth | Correctness |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Round 1** | Direct Prepared (No Cache) | 3,125 rps | 10.17 ms | 204.89 ms | 216.87 ms | 95.0% | 56.48 MB | 7.11 MB | +49.37 MB | PASSED |
-| **Round 1** | Lazy Fetch-on-Miss | 2,749 rps | 9.61 ms | 203.90 ms | 216.29 ms | 95.1% | 125.21 MB | 56.66 MB | +68.55 MB | PASSED |
-| **Round 1** | Active-Only Refresh | 2,659 rps | 10.09 ms | 206.49 ms | 222.72 ms | 95.0% | 199.21 MB | 127.86 MB | +71.35 MB | PASSED |
-| **Round 2** | Direct Prepared (No Cache) | 1,976 rps | 29.00 ms | 230.96 ms | 239.54 ms | 95.0% | 179.39 MB | 159.26 MB | +20.13 MB | PASSED |
-| **Round 2** | Lazy Fetch-on-Miss | 2,473 rps | 11.75 ms | 206.10 ms | 227.00 ms | 95.1% | 220.65 MB | 179.44 MB | +41.21 MB | PASSED |
-| **Round 2** | Active-Only Refresh | 2,437 rps | 12.44 ms | 218.33 ms | 236.69 ms | 95.1% | 187.87 MB | 222.84 MB | -34.97 MB | PASSED |
-| **Round 3** | Direct Prepared (No Cache) | 2,051 rps | 34.19 ms | 237.65 ms | 244.19 ms | 95.1% | 170.19 MB | 138.39 MB | +31.80 MB | PASSED |
-| **Round 3** | Lazy Fetch-on-Miss | 2,070 rps | 24.23 ms | 231.68 ms | 241.93 ms | 95.0% | 125.52 MB | 170.37 MB | -44.85 MB | PASSED |
-| **Round 3** | Active-Only Refresh | 2,266 rps | 19.30 ms | 225.12 ms | 244.34 ms | 95.0% | 127.53 MB | 127.66 MB | -0.13 MB | PASSED |
-| **Round 4** | Direct Prepared (No Cache) | 2,345 rps | 33.34 ms | 232.86 ms | 247.84 ms | 95.1% | 181.74 MB | 101.98 MB | +79.76 MB | PASSED |
-| **Round 4** | Lazy Fetch-on-Miss | 2,321 rps | 15.74 ms | 218.69 ms | 244.34 ms | 95.0% | 222.14 MB | 182.13 MB | +40.01 MB | PASSED |
-| **Round 4** | Active-Only Refresh | 2,247 rps | 21.79 ms | 226.99 ms | 247.59 ms | 95.1% | 132.71 MB | 109.61 MB | +23.10 MB | PASSED |
-| **Round 5** | Direct Prepared (No Cache) | 2,208 rps | 39.81 ms | 243.20 ms | 253.97 ms | 94.9% | 118.16 MB | 156.34 MB | -38.18 MB | PASSED |
-| **Round 5** | Lazy Fetch-on-Miss | 2,480 rps | 18.02 ms | 214.77 ms | 242.45 ms | 94.9% | 229.33 MB | 118.78 MB | +110.55 MB | PASSED |
-| **Round 5** | Active-Only Refresh | 2,381 rps | 17.92 ms | 218.22 ms | 249.06 ms | 95.1% | 130.26 MB | 111.49 MB | +18.77 MB | PASSED |
+> **Schema change (pending re-run):** the new `run-load-test.js` emits a **`DB Queries`** column (total backend queries per strategy) and renames the old `Hit Rate` to **`Row-Exist Rate`** — it measures whether the requested key existed in the DB or cache, **not** the pure cache-hit rate (see §8, Issue 4). The `—` cells below were never captured by the old harness; they will be populated on re-run.
+
+| Round | Strategy | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | Row-Exist Rate | DB Queries | Peak Heap | Base Heap | Heap Growth | Correctness |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Round 1** | Direct Prepared (No Cache) | 3,125 rps | 10.17 ms | 204.89 ms | 216.87 ms | 95.0% | — | 56.48 MB | 7.11 MB | +49.37 MB | PASSED |
+| **Round 1** | Lazy Fetch-on-Miss | 2,749 rps | 9.61 ms | 203.90 ms | 216.29 ms | 95.1% | — | 125.21 MB | 56.66 MB | +68.55 MB | PASSED |
+| **Round 1** | Active-Only Refresh | 2,659 rps | 10.09 ms | 206.49 ms | 222.72 ms | 95.0% | — | 199.21 MB | 127.86 MB | +71.35 MB | PASSED |
+| **Round 2** | Direct Prepared (No Cache) | 1,976 rps | 29.00 ms | 230.96 ms | 239.54 ms | 95.0% | — | 179.39 MB | 159.26 MB | +20.13 MB | PASSED |
+| **Round 2** | Lazy Fetch-on-Miss | 2,473 rps | 11.75 ms | 206.10 ms | 227.00 ms | 95.1% | — | 220.65 MB | 179.44 MB | +41.21 MB | PASSED |
+| **Round 2** | Active-Only Refresh | 2,437 rps | 12.44 ms | 218.33 ms | 236.69 ms | 95.1% | — | 187.87 MB | 222.84 MB | -34.97 MB | PASSED |
+| **Round 3** | Direct Prepared (No Cache) | 2,051 rps | 34.19 ms | 237.65 ms | 244.19 ms | 95.1% | — | 170.19 MB | 138.39 MB | +31.80 MB | PASSED |
+| **Round 3** | Lazy Fetch-on-Miss | 2,070 rps | 24.23 ms | 231.68 ms | 241.93 ms | 95.0% | — | 125.52 MB | 170.37 MB | -44.85 MB | PASSED |
+| **Round 3** | Active-Only Refresh | 2,266 rps | 19.30 ms | 225.12 ms | 244.34 ms | 95.0% | — | 127.53 MB | 127.66 MB | -0.13 MB | PASSED |
+| **Round 4** | Direct Prepared (No Cache) | 2,345 rps | 33.34 ms | 232.86 ms | 247.84 ms | 95.1% | — | 181.74 MB | 101.98 MB | +79.76 MB | PASSED |
+| **Round 4** | Lazy Fetch-on-Miss | 2,321 rps | 15.74 ms | 218.69 ms | 244.34 ms | 95.0% | — | 222.14 MB | 182.13 MB | +40.01 MB | PASSED |
+| **Round 4** | Active-Only Refresh | 2,247 rps | 21.79 ms | 226.99 ms | 247.59 ms | 95.1% | — | 132.71 MB | 109.61 MB | +23.10 MB | PASSED |
+| **Round 5** | Direct Prepared (No Cache) | 2,208 rps | 39.81 ms | 243.20 ms | 253.97 ms | 94.9% | — | 118.16 MB | 156.34 MB | -38.18 MB | PASSED |
+| **Round 5** | Lazy Fetch-on-Miss | 2,480 rps | 18.02 ms | 214.77 ms | 242.45 ms | 94.9% | — | 229.33 MB | 118.78 MB | +110.55 MB | PASSED |
+| **Round 5** | Active-Only Refresh | 2,381 rps | 17.92 ms | 218.22 ms | 249.06 ms | 95.1% | — | 130.26 MB | 111.49 MB | +18.77 MB | PASSED |
 
 ---
 
 ### D. New Features Performance ROI (Promise Coalescing & Bulk Batching)
+*(stale — see banner above)*
+
 Compares `New Caching Logic` (Single-flight Promise Coalescing and Batch Loading enabled) against the `Old Caching Logic` and `Direct Prepared Statements (No Cache)` baseline:
 
-| Strategy | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | Peak Heap | Base Heap | Heap Growth | Correctness |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **[R1] Direct Prepared** | 18,127 rps | 5.36 ms | 35.82 ms | 207.81 ms | 29.75 MB | 5.99 MB | +23.76 MB | ✅ PASSED |
-| **[R1] Old Caching Logic** | 8,461 rps | 27.74 ms | 231.28 ms | 242.06 ms | 55.15 MB | 16.05 MB | +39.10 MB | ✅ PASSED |
-| **[R1] New Caching Logic** | **25,298 rps** | **13.09 ms** | **17.00 ms** | **23.12 ms** | **75.13 MB** | 28.78 MB | **+46.35 MB** | ✅ PASSED |
-| **[R2] Direct Prepared** | 19,493 rps | 5.97 ms | 14.01 ms | 207.34 ms | 67.94 MB | 45.01 MB | +22.93 MB | ✅ PASSED |
-| **[R2] Old Caching Logic** | 7,907 rps | 34.04 ms | 234.16 ms | 248.64 ms | 84.30 MB | 44.99 MB | +39.31 MB | ✅ PASSED |
-| **[R2] New Caching Logic** | **25,552 rps** | **12.49 ms** | **16.92 ms** | **24.32 ms** | **90.78 MB** | 45.77 MB | **+45.01 MB** | ✅ PASSED |
-| **[R3] Direct Prepared** | 18,739 rps | 5.35 ms | 27.31 ms | 209.24 ms | 68.81 MB | 45.86 MB | +22.95 MB | ✅ PASSED |
-| **[R3] Old Caching Logic** | 5,539 rps | 50.87 ms | 250.77 ms | 256.81 ms | 81.03 MB | 45.85 MB | +35.18 MB | ✅ PASSED |
-| **[R3] New Caching Logic** | **24,757 rps** | **13.12 ms** | **19.62 ms** | **25.18 ms** | **91.04 MB** | 46.53 MB | **+44.51 MB** | ✅ PASSED |
-| **[R4] Direct Prepared** | 20,109 rps | 6.44 ms | 15.32 ms | 204.84 ms | 69.54 MB | 46.55 MB | +22.99 MB | ✅ PASSED |
-| **[R4] Old Caching Logic** | 7,874 rps | 49.38 ms | 239.42 ms | 264.38 ms | 85.06 MB | 46.55 MB | +38.51 MB | ✅ PASSED |
-| **[R4] New Caching Logic** | **23,675 rps** | **13.43 ms** | **21.33 ms** | **26.38 ms** | **91.21 MB** | 46.55 MB | **+44.66 MB** | ✅ PASSED |
-| **[R5] Direct Prepared** | 18,557 rps | 6.10 ms | 18.15 ms | 210.47 ms | 69.39 MB | 46.56 MB | +22.83 MB | ✅ PASSED |
-| **[R5] Old Caching Logic** | 6,196 rps | 58.20 ms | 260.75 ms | 270.77 ms | 83.67 MB | 46.55 MB | +37.12 MB | ✅ PASSED |
-| **[R5] New Caching Logic** | **24,002 rps** | **13.37 ms** | **19.34 ms** | **23.27 ms** | **92.12 MB** | 47.56 MB | **+44.56 MB** | ✅ PASSED |
+> **Schema change (pending re-run):** the new `run-new-features-benchmark.js` emits a **`DB Queries`** column (total backend queries per strategy). The `—` cells below were never captured by the old harness; they will be populated on re-run.
+
+| Strategy | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | DB Queries | Peak Heap | Base Heap | Heap Growth | Correctness |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **[R1] Direct Prepared** | 18,127 rps | 5.36 ms | 35.82 ms | 207.81 ms | — | 29.75 MB | 5.99 MB | +23.76 MB | ✅ PASSED |
+| **[R1] Old Caching Logic** | 8,461 rps | 27.74 ms | 231.28 ms | 242.06 ms | — | 55.15 MB | 16.05 MB | +39.10 MB | ✅ PASSED |
+| **[R1] New Caching Logic** | **25,298 rps** | **13.09 ms** | **17.00 ms** | **23.12 ms** | — | **75.13 MB** | 28.78 MB | **+46.35 MB** | ✅ PASSED |
+| **[R2] Direct Prepared** | 19,493 rps | 5.97 ms | 14.01 ms | 207.34 ms | — | 67.94 MB | 45.01 MB | +22.93 MB | ✅ PASSED |
+| **[R2] Old Caching Logic** | 7,907 rps | 34.04 ms | 234.16 ms | 248.64 ms | — | 84.30 MB | 44.99 MB | +39.31 MB | ✅ PASSED |
+| **[R2] New Caching Logic** | **25,552 rps** | **12.49 ms** | **16.92 ms** | **24.32 ms** | — | **90.78 MB** | 45.77 MB | **+45.01 MB** | ✅ PASSED |
+| **[R3] Direct Prepared** | 18,739 rps | 5.35 ms | 27.31 ms | 209.24 ms | — | 68.81 MB | 45.86 MB | +22.95 MB | ✅ PASSED |
+| **[R3] Old Caching Logic** | 5,539 rps | 50.87 ms | 250.77 ms | 256.81 ms | — | 81.03 MB | 45.85 MB | +35.18 MB | ✅ PASSED |
+| **[R3] New Caching Logic** | **24,757 rps** | **13.12 ms** | **19.62 ms** | **25.18 ms** | — | **91.04 MB** | 46.53 MB | **+44.51 MB** | ✅ PASSED |
+| **[R4] Direct Prepared** | 20,109 rps | 6.44 ms | 15.32 ms | 204.84 ms | — | 69.54 MB | 46.55 MB | +22.99 MB | ✅ PASSED |
+| **[R4] Old Caching Logic** | 7,874 rps | 49.38 ms | 239.42 ms | 264.38 ms | — | 85.06 MB | 46.55 MB | +38.51 MB | ✅ PASSED |
+| **[R4] New Caching Logic** | **23,675 rps** | **13.43 ms** | **21.33 ms** | **26.38 ms** | — | **91.21 MB** | 46.55 MB | **+44.66 MB** | ✅ PASSED |
+| **[R5] Direct Prepared** | 18,557 rps | 6.10 ms | 18.15 ms | 210.47 ms | — | 69.39 MB | 46.56 MB | +22.83 MB | ✅ PASSED |
+| **[R5] Old Caching Logic** | 6,196 rps | 58.20 ms | 260.75 ms | 270.77 ms | — | 83.67 MB | 46.55 MB | +37.12 MB | ✅ PASSED |
+| **[R5] New Caching Logic** | **24,002 rps** | **13.37 ms** | **19.34 ms** | **23.27 ms** | — | **92.12 MB** | 47.56 MB | **+44.56 MB** | ✅ PASSED |
 
 ### Critical ROI Insights:
 1. **Promise Coalescing prevents Thundering Herd**: The p99 tail latency drops from **~285 ms** (old architecture) to **~25 - 31 ms** (new architecture), keeping application latencies extremely flat under stress.
@@ -178,6 +222,8 @@ Compares `New Caching Logic` (Single-flight Promise Coalescing and Batch Loading
 ---
 
 ## 6. Deep Dive: Connection Pool Queueing & Feature ROI (Comparison of C and D)
+
+> *Interprets the stale §5 data. The qualitative mechanism (pool saturation under key-by-key miss storms) is expected to hold after the re-run; the specific latency/throughput figures quoted below should be refreshed.*
 
 A critical observation from the real 5-round data is the difference in behavior between the **Sustained High-Concurrency Load Test (C)** and the **New Features Performance Benchmark (D)**:
 
@@ -196,6 +242,8 @@ In `run-new-features-benchmark.js` (D), we isolate the benefits of **Single-flig
 ---
 
 ## 7. Memory Baseline & Pool Warm-up Analysis
+
+> *This analysis describes the **old single-process harness**, where every round shared one pool and heap — which is exactly why a cross-round "base heap warm-up" curve existed to analyze. Under the new process-isolated harness each strategy starts from a cold heap, so this section is largely obsoleted; it is retained to explain the historical §5 numbers. See §8, Issue 1.*
 
 An analysis of the **Base Heap Memory** across consecutive benchmark rounds shows a step-up from Round 1 to Round 2, followed by absolute stabilization:
 - **Round 1 Base Heap**: ~5.99 MB
