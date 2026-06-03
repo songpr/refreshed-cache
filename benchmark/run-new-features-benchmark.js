@@ -105,6 +105,20 @@ const STRATEGIES = [
                         await sleep(10);
                         const [row] = await trackedSql`SELECT uuid, name, email FROM users WHERE uuid = ${key}`;
                         return row || undefined;
+                    },
+                    // Enable Observability Hooks for Performance & Validity checking
+                    onRefresh: (stats) => {
+                        // Verified refresh callback
+                    },
+                    onError: (err) => {
+                        console.error('[Benchmark Refresher Error]', err);
+                    },
+                    checkValidity: (key, value) => {
+                        // Check cached item has correct user object fields
+                        return value && typeof value === 'object' && typeof value.name === 'string';
+                    },
+                    isEqual: (a, b) => {
+                        return a && b && a.name === b.name && a.email === b.email;
                     }
                 }
             );
@@ -264,7 +278,12 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
         const intervalDbQueries = dbQueryCount;
         dbQueryCount = 0;
 
-        console.log(`[${t * intervalSec}s] Cache Size: ${cache ? cache.size : 'N/A'} | Throughput: ${throughput} rps | p50: ${pct.p50}ms | p95: ${pct.p95}ms | p99: ${pct.p99}ms | DB Queries: ${intervalDbQueries} | Heap: ${mem.heapUsed} MB | RSS: ${mem.rss} MB`);
+        let metricsStr = '';
+        if (cache && cache.metrics) {
+            const m = cache.metrics;
+            metricsStr = ` | Hits: ${m.hits} | Misses: ${m.misses} | Coalesced: ${m.coalescedFetches} | Invalidations: ${m.invalidations}`;
+        }
+        console.log(`[${t * intervalSec}s] Cache Size: ${cache ? cache.size : 'N/A'} | Throughput: ${throughput} rps | p50: ${pct.p50}ms | p95: ${pct.p95}ms | p99: ${pct.p99}ms | DB Queries: ${intervalDbQueries}${metricsStr} | Heap: ${mem.heapUsed} MB | RSS: ${mem.rss} MB`);
 
         statsHistory.push({
             elapsed: t * intervalSec,
