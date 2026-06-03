@@ -43,7 +43,7 @@ class DataCache {
         if (typeof (resetOnRefresh) !== "boolean") throw new Error("Invalid resetOnRefresh");
         if (options.refreshAt != null) {
             const { days, at } = options.refreshAt;
-            if (!Number.isInteger(days) || days < 0 || days > 14) throw new Error("Invalid refreshAt.days, support 1-14");
+            if (!Number.isInteger(days) || days < 1 || days > 14) throw new Error("Invalid refreshAt.days, support 1-14");
             const matchs = (typeof at === 'string') ? at.match(timeAtRegex) : null;
             if (matchs === null) throw new Error("Invalid refreshAt.at, must be string in format 'HH:mm:ss', in 24 hours format");
             const _refreshAt = { daysMs: days * 24 * 60 * 60 * 1000, msFrom00_00: (parseInt(matchs[1]) * 60 * 60 * 1000 + parseInt(matchs[2]) * 60 * 1000 + parseInt(matchs[3]) * 1000) }

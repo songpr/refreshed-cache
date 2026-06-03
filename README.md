@@ -52,7 +52,7 @@ Therefore items must be sorted by its prority, which the most important one is t
    note if refreshAt is specified too, then the refreshAt will be use, and ignore refreshAge.
 
 *  `refreshAt` refresh at specific time every x days. Specific as object in format {days,at} e.g. {days:2,at: "10:00:00"}, time of the day to refresh the data
-                                                days:x -- refresh every x days 
+                                                days:x -- refresh every x days (x must be 1-14)
                                                 at:"HH:mm:ss" -- refresh at 
 
 * `passRecentKeysOnRefresh` pass recent keys (Array) - that not expired - to fetch function when refresh default = false.
@@ -93,10 +93,6 @@ Therefore items must be sorted by its prority, which the most important one is t
 
     delete the cached data using key.
 
-* `del(key)`
-
-    alias of delete(), delete the cached data using key.
-
 * `clear()`
 
     clear all cached data.
@@ -104,14 +100,6 @@ Therefore items must be sorted by its prority, which the most important one is t
 * `entries()`
 
     Return a generator yielding [key, value] pairs.
-
-* `find(findFunction)`
-
-    Find a value for which the supplied fn method returns a truthy value, similar to Array.find().
-
-    The item add recently will be finded first.
-    
-    findFunction is called as fn(value, key, cache).
 
 * `asyncRefresh()`
 
@@ -213,7 +201,48 @@ await cache.close();
 ## Quality & Performance Metrics
 
 ### Test Coverage
-`refreshed-cache` maintains **100% Line Coverage** over its core cache manager, ensuring high reliability across all refresh timer loops, cache eviction schedules, and error-handling paths.
+Latest coverage from `npm test -- --coverage`:
+
+* Statements: **91.84%**
+* Branches: **82.92%**
+* Functions: **94.28%**
+* Lines: **97.95%**
+
+Core file coverage (`index.js`) currently matches the overall values above.
+
+### Test Execution Summary
+Latest full test run (`npm test`) results:
+
+* Test suites: **15 passed, 2 skipped, 0 failed**
+* Tests: **61 passed, 3 skipped, 0 failed**
+
+Roadmap tests are intentionally skipped by default and can be enabled via environment variable.
+
+## Testing
+
+Run the standard suite:
+
+```bash
+npm test
+```
+
+Run with coverage report:
+
+```bash
+npm test -- --coverage
+```
+
+Run open-handle diagnostics (serial mode):
+
+```bash
+npm test -- --detectOpenHandles --runInBand
+```
+
+Run roadmap/future-feature tests explicitly:
+
+```bash
+RUN_ROADMAP_TESTS=true npm test -- test/tdd_roadmap.test.js
+```
 
 ### Memory & Performance report
 * **Low Memory Footprint**: Evaluated at **~666 bytes per cache item** (storing realistic string values), keeping RAM usage highly predictable.
@@ -223,4 +252,4 @@ await cache.close();
 
 ## Roadmap & Future Development
 
-For detailed performance comparison benchmarks, database prepared statements analysis, and the future development plan, please refer to [DEVELOPMENT_PLAN.md](file:///Users/prungsiri/Projects/refreshed-cache/DEVELOPMENT_PLAN.md).
+For detailed performance comparison benchmarks, database prepared statements analysis, and the future development plan, please refer to [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md).

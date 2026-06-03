@@ -48,6 +48,9 @@ test("check maxAge,refreshAge,resetOnRefresh,fetchMissCache,max initiate", () =>
     expect(() => {
         new (require("../index"))(fn, { max: (new Date()) });
     }).toThrow("Invalid max");
+    expect(() => {
+        new (require("../index"))(fn, { refreshAt: { days: 0, at: "10:00:00" } });
+    }).toThrow("Invalid refreshAt.days, support 1-14");
 })
 
 test("list options", () => {
