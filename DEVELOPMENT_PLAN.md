@@ -60,9 +60,21 @@ If a use case doesn't match that sentence, the honest recommendation is raw `lru
 - **TypeScript types** (`index.d.ts`). Cheap, and a hard adoption blocker for many teams today.
 
 ### Tier 2 — Sharpen the core (optional, medium cost)
-- **Observability hooks**: expose counters for hits/misses/refreshes/coalesced-fetches and an `onRefresh`/`onError` callback. Right now refresh errors only `console.error` (`index.js:91`); production users need a hook.
-- **Per-refresh error backoff**: on repeated `asyncRefresh` failure, back off instead of retrying every interval at full rate.
-- **`getOrFetchMany` single-flight**: the batch path does not yet coalesce overlapping concurrent batches the way `getOrFetch` does for single keys.
+
+This tier focuses on operational stability and enterprise-grade reliability. Below is the justification, ROI, and real-world cases for why these features are needed:
+
+*   **Observability Hooks & Metrics**
+    *   **What**: Expose counters for hits/misses/refreshes/coalesced-fetches and callbacks for `onRefresh`/`onError`.
+    *   **Why it is needed / Real-world case**: Production systems require strict monitoring of **Cache Hit Rate (CHR)**. A drop in CHR directly correlates with database latency spikes. Currently, refresh errors only output to `console.error` (`index.js:91`), which cannot be easily ingested as structured alerts in APM platforms like Datadog, Prometheus, or OpenTelemetry. Without callbacks, it is impossible to alert on persistent refresh failures or dynamically track cache health.
+    *   **ROI**: **Extremely High.** Minimal implementation cost (~50 LOC), but it is a hard prerequisite for enterprise/production readiness. SRE teams will not approve caches without metrics and alerts.
+*   **Per-Refresh Error Backoff & Jitter**
+    *   **What**: Introduce exponential backoff with random jitter on repeated `asyncRefresh` failures instead of retrying at the full `refreshAge` rate.
+    *   **Why it is needed / Real-world case**: During backend outages or network partitions, a naive cache refresh loop acts as a self-inflicted DDoS attack (a **retry storm**). If a database is overloaded and struggling to recover, constant large-scale cache refreshes from multiple application instances will keep it down indefinitely. Backoff with jitter spreads out retry attempts, allowing the downstream system to recover safely.
+    *   **ROI**: **High.** Dramatically improves downstream resilience and protects the database/APIs from cascading failures during outages.
+*   **`getOrFetchMany` Single-Flight Coalescing**
+    *   **What**: Extend single-flight coalescing to the batch path (`getOrFetchMany` / `fetchByKeys`), deduping overlapping concurrent batch fetches.
+    *   **Why it is needed / Real-world case**: Under heavy traffic (e.g., rendering a homepage or category catalog), multiple concurrent requests will ask for overlapping sets of keys simultaneously (e.g., `[item1, item2, item3]`). Currently, the batch path does not coalesce concurrent duplicate key fetches, resulting in multiple redundant queries hitting the database.
+    *   **ROI**: **Medium-High.** Resolves the thundering herd problem for batch queries, reducing database QPS by orders of magnitude for read-heavy dashboards and GraphQL endpoints.
 
 ### Tier 3 — Distributed invalidation (DEFERRED / likely cut)
 The previous plan proposed Pub/Sub + native-`fetch`/WebSocket cache sync across nodes. **Recommendation: cut, or keep as a documented integration pattern only — do not build it into the library.**
