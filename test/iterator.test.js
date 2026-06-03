@@ -11,7 +11,7 @@ test("test iterator", async () => {
     expect(cache.get("d")).toEqual(undefined);
     expect(cache.get("ee")).toEqual(undefined);
     expect(cache.size).toEqual(3);
-    
+    await cache.close();
 })
 
 test("test with generator", async () => {
@@ -105,10 +105,16 @@ const { PassThrough } = require('stream');
 
 function getWebStream(url) {
     const stream = new PassThrough();
-    https.get(url, (res) => {
+    const req = https.get(url, { agent: false }, (res) => {
         res.pipe(stream);
+        stream.on('close', () => {
+            res.destroy();
+        });
     }).on('error', (err) => {
         stream.emit('error', err);
+    });
+    stream.on('close', () => {
+        req.destroy();
     });
     return stream;
 }

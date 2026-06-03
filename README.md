@@ -47,18 +47,70 @@ npm install refreshed-cache --save
 
 ## Usage:
 
+### CommonJS (CJS)
 ```javascript
 const Cache = require("refreshed-cache");
-const options = { max: 500
-              , maxAge: 1200
-              , refreshAge : 600 };
-const fetch = ()=>Object.entries({ a: 1, b: 2, c: 3 });
-const cache = new Cache(fetch,options);
-await cache.init()
-cache.get("a") // 1
-await cache.close() //clear cache and stop refresh
 
+const cache = new Cache(
+  () => Object.entries({ a: 1, b: 2, c: 3 }),
+  { max: 500, maxAge: 1200, refreshAge: 600 }
+);
+
+await cache.init();
+console.log(cache.get("a")); // 1
+await cache.close();
 ```
+
+### ES Modules (ESM)
+If your Node.js project utilizes native ES Modules (`"type": "module"` in `package.json`), you can import the cache directly:
+```javascript
+import Cache from "refreshed-cache";
+
+const cache = new Cache(
+  () => Object.entries({ a: 1, b: 2, c: 3 }),
+  { max: 500, maxAge: 1200, refreshAge: 600 }
+);
+
+await cache.init();
+console.log(cache.get("a")); // 1
+await cache.close();
+```
+## TypeScript Support:
+
+`refreshed-cache` includes built-in TypeScript type definitions out of the box (no separate `@types/refreshed-cache` installation required). 
+
+You can instantiate `DataCache` with generic parameters for the keys and values (`DataCache<K, V>`), providing compile-time safety and IDE autocomplete:
+
+```typescript
+import DataCache from "refreshed-cache";
+// Or: import DataCache = require("refreshed-cache");
+
+interface User {
+  id: string;
+  name: string;
+}
+
+const fetchAllUsers = async (): Promise<Array<[string, User]>> => {
+  return [["1", { id: "1", name: "Alice" }]];
+};
+
+const cache = new DataCache<string, User>(
+  fetchAllUsers,
+  {
+    max: 1000,
+    maxAge: 300,
+    fetchByKey: async (id: string) => {
+      return { id, name: `User ${id}` };
+    }
+  }
+);
+
+await cache.init();
+const user = cache.get("1"); // Typed as User | undefined
+console.log(user?.name);
+await cache.close();
+```
+
 ## Cache constructor
 
 data-cache constructor requie a fetch function, and an optional options
@@ -277,8 +329,8 @@ Under high concurrent single-key miss storms, standard cache-miss strategies run
 * **Connection Pool Saturation**: Firing individual single-key fetches (`cache.getOrFetch(key)`) for cache misses under high concurrency saturates the Postgres client connection pool.
 * **Latency Alignment**: Due to socket queueing delays, standard caching latencies align with the direct prepared statement baseline (~240 ms p99).
 
-### D. New Features Performance ROI (Promise Coalescing & Bulk Batching)
-By implementing Single-flight Promise Coalescing and Bulk Batch Loading, the queueing bottleneck is completely resolved:
+### D. New Features Performance ROI (Request Coalescing & Bulk Batching)
+By implementing Request Coalescing (single-flight) and Bulk Batch Loading, the queueing bottleneck is completely resolved:
 * **Throughput Boost**: Scales throughput by **over 4x** (from ~5,500 rps with old caching architecture to **~24,500 rps**).
 * **Latency ROI**: Drops tail latency (p99) from **~285 ms** to **~31 ms** under high stress.
 * **DB Query Reduction**: Cuts total database queries triggered in half (e.g., from 103,837 queries to 51,514), protecting the database from thundering herd storms.
@@ -286,7 +338,18 @@ By implementing Single-flight Promise Coalescing and Bulk Batch Loading, the que
 
 ### E. Deep Dive: Connection Pool Queueing & Why New Features Matter
 * **Why C aligns with DB baseline**: In load test C, the active sliding window (120,000 keys) is wider than the cache capacity (100,000 keys). This forces constant evictions and triggers over **56,000 - 65,000 individual DB queries**. Because these are executed key-by-key, they saturate the Postgres client pool, causing queueing delays that affect both cache misses and direct prepared statements.
-* **How D resolves the bottleneck**: Single-flight Promise Coalescing coalesces concurrent duplicate reads targeting the same hot keys into a single database query. Meanwhile, Bulk Batch Loading groups batch requests into a single SQL statement (`WHERE uuid IN (...)`). By eliminating redundant database roundtrips, it prevents connection pool saturation, dropping p99 tail latency by **90%** (to ~31 ms) and scaling throughput to **~24,500 rps**.
+* **How D resolves the bottleneck**: Request Coalescing (single-flight) coalesces concurrent duplicate reads targeting the same hot keys into a single database query. Meanwhile, Bulk Batch Loading groups batch requests into a single SQL statement (`WHERE uuid IN (...)`). By eliminating redundant database roundtrips, it prevents connection pool saturation, dropping p99 tail latency by **90%** (to ~31 ms) and scaling throughput to **~24,500 rps**.
+
+### F. Cache-Penetration Attack Protection (Miss-Cache, 5 Rounds, 60s)
+Simulated penetration attack: 50% of traffic hammers a fixed pool of **1,000 non-existent keys** (valid set pre-warmed), with `maxAgeMiss: 20s` so miss entries expire and refill ~3 times per run. Full results in [§5E](benchmark/README.md#e-cache-penetration-attack-protection-miss-cache-5-rounds-60s-with-ttl-cycling).
+
+| Strategy | DB Queries / 60s | p99 Latency |
+| :--- | :--- | :--- |
+| Direct Prepared (No Cache) | ~110k–117k | ~105–212 ms |
+| Cache — miss-cache **disabled** (`maxMiss: 0`) | ~56k–57k | ~10–20 ms |
+| Cache — miss-cache **enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | **~3,060** | **~0.2 ms** |
+
+* **~95% DB query reduction** versus a cache with miss protection disabled. Backend load is bounded to ~pool-size per `maxAgeMiss` interval (a sawtooth: ~1,000 fetches per 20s window), not one query per bogus request — proving the cache absorbs the attack rather than relaying it to the database.
 
 ---
 
@@ -330,11 +393,13 @@ To clean up deprecated, duplicate, and sub-optimal methods in the cache API, ver
 
 ## Effective Production Usage Patterns (v1.8.0 Features)
 
-While caching strategies (like Promise Coalescing and Batching) are not unique to `refreshed-cache` and exist in other tools (e.g. `lru-cache`'s native `.fetch()` API, or `dataloader`), version `1.8.0` wraps them natively within its scheduled refresh and miss-cache structures to make them easy to use.
+While caching strategies (like Request Coalescing and Batching) are not unique to `refreshed-cache` and exist in other tools (e.g. `lru-cache`'s native `.fetch()` API, or `dataloader`), version `1.8.0` wraps them natively within its scheduled refresh and miss-cache structures to make them easy to use.
 
 These patterns demonstrate how to configure and utilize these features effectively:
 
-### Pattern A: Thundering Herd Protection (Promise Coalescing)
+### Pattern A: Thundering Herd Protection (Request Coalescing)
+**Benchmark backing:** [§5D](benchmark/README.md#d-new-features-performance-roi-request-coalescing--bulk-batching) — Single-flight coalescing drops p99 tail latency from ~240 ms (old logic, key-by-key misses) to ~35–67 ms, while cutting DB queries by ~63% (~50k vs ~135k).
+
 If your app experiences spikes of duplicate requests targeting the same hot keys (e.g., flash sales, breaking news), configuring `fetchByKey` automatically coalesces concurrent misses into a single database query.
 
 ```javascript
@@ -361,6 +426,8 @@ app.get("/product/:id", async (req, res) => {
 ```
 
 ### Pattern B: Resolving N+1 Database Queries (Bulk Batch Loading)
+**Benchmark backing:** [§5D](benchmark/README.md#d-new-features-performance-roi-request-coalescing--bulk-batching) — replacing key-by-key fetches with `getOrFetchMany` + `fetchByKeys` lifts throughput **2.3–2.7x** (~22–25k rps vs ~9–12k) and cuts DB queries by ~63% (~50k vs ~135k).
+
 When loading dashboard widgets, lists, or feeds that query multiple related entities, use `fetchByKeys` and `cache.getOrFetchMany(keys)`. This groups all missing keys and fetches them in a single batch statement (e.g. `WHERE id IN (...)`) rather than iterating key-by-key.
 
 ```javascript
@@ -387,6 +454,8 @@ app.get("/users/bulk", async (req, res) => {
 ```
 
 ### Pattern C: Active-Only Memory-Efficient Caching (For Huge Datasets)
+**Benchmark backing:** [§5B](benchmark/README.md#b-long-running-strategy-simulation-5-rounds-max-100000) — against a 10M-row table, Active-Only Refresh holds a ~95% hit rate while firing only **~601 DB queries per 30s window** vs ~51k for lazy fetch (a **>90x** reduction), with peak heap bounded at ~44–48 MB.
+
 When your database contains millions of records (e.g., 10M or 100M rows), caching the entire dataset in-process is impossible. Use the **Active-Only Refresh** strategy. It regularly refreshes only the keys that have been read since the last refresh interval, keeping the hot set warm while bounding memory usage.
 
 ```javascript
@@ -409,9 +478,11 @@ const cache = new Cache(
 ```
 
 ### Pattern D: Safeguarding against Cache Penetration (Hard Miss Protection)
+**Benchmark backing:** [§5E](benchmark/README.md#e-cache-penetration-attack-protection-miss-cache-5-rounds-60s-with-ttl-cycling) — under a 50%-bogus penetration attack against a 1,000-key pool, miss-cache bounds DB load to ~pool-size per `maxAgeMiss` window (**~3,060 queries/60s**) vs ~57k with `maxMiss: 0` and ~112k uncached — a **~95% reduction** — while p99 stays **~0.2 ms**.
+
 When clients query non-existent keys (e.g. `product-non-existent-999`), a cache miss normally forces a database query. A flood of non-existent queries can take down your database (Cache Penetration Attack). 
 
-Configure `maxMiss` and `maxAgeMiss` to track non-existent keys in a separate bounded miss-cache, preventing database lookup spam.
+Configure `maxMiss` and `maxAgeMiss` to track non-existent keys in a separate bounded miss-cache, preventing database lookup spam. Under sustained attack the miss-cache reduces backend load to roughly *one fetch per distinct bad key per `maxAgeMiss` interval*, not one per request.
 
 ```javascript
 const cache = new Cache(

@@ -84,3 +84,18 @@ If distributed sync is ever pursued, gate it behind real demand (issues/users as
 - **"Product" goal (Tier 3)** → not advised for a solo maintainer; negative expected ROI against incumbents.
 
 Decision gate before any Tier 2/3 work: **does published-1.8.0 + honest docs attract real users?** Let that answer, not the roadmap, drive further investment.
+
+---
+
+## 4. Architectural & Design Decisions
+
+### Class Naming Rationale: `DataCache` vs. `RefreshedCache`
+A common question when inspecting the codebase is why the main class is named `DataCache` while the library is published as `refreshed-cache`.
+
+* **Domain vs. Mechanism:** The package name `refreshed-cache` describes the *refresh mechanism* (push-based/scheduled refreshing). The class name `DataCache` describes the *domain responsibility* (acting as a local cache/provider for general application data, such as product catalogs, user profiles, or config maps).
+* **Consumer Autonomy:** Since the class is exported directly via standard CommonJS (`module.exports = DataCache`), consumers have total autonomy to alias it to whatever name they prefer at import time:
+  ```javascript
+  const Cache = require("refreshed-cache");
+  const RefreshedCache = require("refreshed-cache");
+  ```
+* **Preserving Compatibility:** Renaming `DataCache` to `RefreshedCache` inside the source files and TypeScript typings was decided against to preserve backward compatibility. Doing so would break existing applications that import the type definitions directly (`import { DataCache } ...`) or perform runtime checks (`instanceof DataCache`).

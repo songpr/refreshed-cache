@@ -3,8 +3,9 @@
   "description": "caching data with LRU Cache and refresh it within specified time",
   "version": "1.8.0",
   "main": "index.js",
+  "types": "index.d.ts",
   "scripts": {
-    "test": "jest",
+    "test": "tsc && tsd && tsc --noEmit false --outDir dist --rootDir . && node dist/test/types-runtime.js && rm -rf dist && node test/esm-usage.mjs && jest --runInBand",
     "release": "rm -r -f node_modules && rm package-lock.json && npm install --production && npm audit > audit_log.txt"
   },
   "repository": {
@@ -24,13 +25,16 @@
   "homepage": "https://github.com/songpr/refreshed-cache#readme",
   "devDependencies": {
     "@faker-js/faker": "^10.4.0",
+    "@types/node": "^25.9.1",
     "csv-generate": "^4.5.1",
     "csv-parse": "^6.2.1",
     "delay": "^7.0.0",
     "got": "^15.0.5",
     "jest": "^30.4.2",
     "jest-junit": "^17.0.0",
-    "postgres": "^3.4.9"
+    "postgres": "^3.4.9",
+    "tsd": "^0.33.0",
+    "typescript": "^6.0.3"
   },
   "dependencies": {
     "lru-cache": "^11.5.1"
@@ -39,5 +43,8 @@
     "suiteNameTemplate": "{filepath}",
     "outputDirectory": ".",
     "outputName": "junit.xml"
+  },
+  "tsd": {
+    "directory": "test"
   }
 }

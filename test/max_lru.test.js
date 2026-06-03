@@ -13,7 +13,7 @@ test("fetch exceed max, keep first max entries - make sure the most important en
     expect(cache.get("c")).toEqual(3);
     expect(cache.get("d")).toBe(undefined);;
     expect(cache.get("ee")).toBe(undefined);;
-    
+    await cache.close();
 })
 
 test("fetch exceed max, keep first max entries - the least recently get/set will be removed first", async () => {
@@ -31,7 +31,7 @@ test("fetch exceed max, keep first max entries - the least recently get/set will
     expect(cache.get("e")).toBe(undefined); //just get b,c so e is least recently use
     expect(cache.get("d")).toBe(undefined);
     expect(cache.get("ee")).toBe(undefined);
-    
+    await cache.close();
 })
 
 const ntest = () => { };

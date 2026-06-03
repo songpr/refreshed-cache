@@ -191,7 +191,7 @@ test("maxAge expired, maxAge > refreshAge, resetOnRefresh = false", async () => 
         round++
         return entires;
     };
-    const cache = new (require("../index"))(fn, { maxAge: 4, refreshAge: 2, resetOnRefresh: false });
+    const cache = new (require("../index"))(fn, { maxAge: 3, refreshAge: 2, resetOnRefresh: false });
     await cache.init()
     expect(cache.get("a_1")).toEqual(1);
     expect(cache.get("b_1")).toEqual(2);

@@ -179,21 +179,14 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
         // Wait for next loop run (which runs callback, starts asyncRefresh, closes cache, and hits line 82)
         await new Promise(r => setTimeout(r, 1100));
 
-        // Test line 77: _timeoutLoop fires after close (with cleared timeout bypassed)
-        const origClearTimeout = global.clearTimeout;
-        global.clearTimeout = () => {};
-        try {
-            const cache2 = new DataCache(async () => [], { refreshAge: 1 });
-            await cache2.init();
-            await cache2.close();
-            // Trigger loop manually which hits line 77 since isClose is true
-            let hasReturned = false;
-            const asyncRefreshDummy = async () => {};
-            cache2._timeoutLoop(asyncRefreshDummy, 1);
-            await new Promise(r => setTimeout(r, 5));
-        } finally {
-            global.clearTimeout = origClearTimeout;
-        }
+        // Test line 77: _timeoutLoop fires after close
+        const cache2 = new DataCache(async () => [], { refreshAge: 1 });
+        await cache2.init();
+        await cache2.close();
+        // Trigger loop manually which hits line 77 since isClose is true
+        const asyncRefreshDummy = async () => {};
+        cache2._timeoutLoop(asyncRefreshDummy, 1);
+        await new Promise(r => setTimeout(r, 5));
 
 
     });
@@ -361,19 +354,13 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
         await cacheRefreshAtZeroFuture.close();
 
         // Test line 119: _refreshAtLoop fires after close
-        const origClearTimeout = global.clearTimeout;
-        global.clearTimeout = () => {};
-        try {
-            const cache3 = new DataCache(async () => []);
-            await cache3.init();
-            await cache3.close();
-            const cache3Now = new Date();
-            const cache3NowMs = cache3Now.getHours() * 3600000 + cache3Now.getMinutes() * 60000 + cache3Now.getSeconds() * 1000 + cache3Now.getMilliseconds();
-            cache3._refreshAtLoop(cache3.asyncRefresh, { msFrom00_00: cache3NowMs, daysMs: 1 }, 1);
-            await new Promise(r => setTimeout(r, 20));
-        } finally {
-            global.clearTimeout = origClearTimeout;
-        }
+        const cache3 = new DataCache(async () => []);
+        await cache3.init();
+        await cache3.close();
+        const cache3Now = new Date();
+        const cache3NowMs = cache3Now.getHours() * 3600000 + cache3Now.getMinutes() * 60000 + cache3Now.getSeconds() * 1000 + cache3Now.getMilliseconds();
+        cache3._refreshAtLoop(cache3.asyncRefresh, { msFrom00_00: cache3NowMs, daysMs: 1 }, 1);
+        await new Promise(r => setTimeout(r, 20));
     });
 
     test('Sync and Async configurations of fetch and passRecentKeysOnRefresh', async () => {
@@ -494,6 +481,7 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
             const asyncRefreshFailing = async () => {
                 throw new Error("simulated refresh error");
             };
+            clearTimeout(cache._timeoutId);
             cache._timeoutLoop(asyncRefreshFailing, 1);
             await new Promise(r => setTimeout(r, 20));
         } catch (err) {

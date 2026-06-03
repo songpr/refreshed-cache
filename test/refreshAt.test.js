@@ -20,7 +20,7 @@ test("fetch at specific time", async () => {
     const nextTimeMs = cache._runAt.getHours() * 60 * 60 * 1000 + cache._runAt.getMinutes() * 60 * 1000 + cache._runAt.getSeconds() * 1000;
     expect(nextTimeMs).toBeLessThanOrEqual(timeMS + 1000);
     expect(nextTimeMs).toBeGreaterThanOrEqual(timeMS - 1000);
-    
+    await cache.close();
 });
 
 test("fetch at specific time, maxAge", async () => {
@@ -71,6 +71,7 @@ test("fetch at specific time and wait for refresh loop to fire", async () => {
     // Manually trigger the refreshAtLoop with a short delay (100ms)
     const now = new Date();
     const nowMs = now.getHours() * 3600000 + now.getMinutes() * 60000 + now.getSeconds() * 1000 + now.getMilliseconds();
+    clearTimeout(cache._timeoutId);
     await cache._refreshAtLoop(cache.asyncRefresh, { msFrom00_00: nowMs + 100, daysMs: 100000 }, 0);
     
     // Wait for the timeout to fire (100ms scheduled + buffer)
@@ -99,6 +100,7 @@ test("fetch at specific time with error during refresh loop", async () => {
     // Manually trigger the refreshAtLoop with a short delay (100ms)
     const now = new Date();
     const nowMs = now.getHours() * 3600000 + now.getMinutes() * 60000 + now.getSeconds() * 1000 + now.getMilliseconds();
+    clearTimeout(cache._timeoutId);
     await cache._refreshAtLoop(cache.asyncRefresh, { msFrom00_00: nowMs + 100, daysMs: 100000 }, 0);
     
     await delay(250);
@@ -121,6 +123,7 @@ test("fetch at specific time and close during refresh", async () => {
     
     const now = new Date();
     const nowMs = now.getHours() * 3600000 + now.getMinutes() * 60000 + now.getSeconds() * 1000 + now.getMilliseconds();
+    clearTimeout(cache._timeoutId);
     await cache._refreshAtLoop(cache.asyncRefresh, { msFrom00_00: nowMs + 100, daysMs: 100000 }, 0);
     
     // Wait for it to trigger the setTimeout and start asyncRefresh (100ms + buffer)
@@ -148,6 +151,7 @@ test("fetch at specific time and throw error and close during refresh", async ()
     
     const now = new Date();
     const nowMs = now.getHours() * 3600000 + now.getMinutes() * 60000 + now.getSeconds() * 1000 + now.getMilliseconds();
+    clearTimeout(cache._timeoutId);
     await cache._refreshAtLoop(cache.asyncRefresh, { msFrom00_00: nowMs + 100, daysMs: 100000 }, 0);
     
     await delay(150);
@@ -174,6 +178,7 @@ test("unexpected error in catch block of refreshAtLoop", async () => {
         };
         const now = new Date();
         const nowMs = now.getHours() * 3600000 + now.getMinutes() * 60000 + now.getSeconds() * 1000 + now.getMilliseconds();
+        clearTimeout(cache._timeoutId);
         cache._refreshAtLoop(asyncRefreshFailing, { msFrom00_00: nowMs + 10, daysMs: 100000 }, 0);
         
         await delay(50);

@@ -35,7 +35,7 @@ The database is populated with **10,000,000** records generated via a fast SQL g
 - `run-benchmark.js`: Measures standard scenario throughput (hits vs. misses) and tracks `DB Queries Triggered`.
 - `run-long-benchmark.js`: Simulates caching strategies over multiple intervals, verifying memory limits and garbage collection behavior.
 - `run-load-test.js`: Sustained concurrent user load test comparing local caching against Direct Prepared Statements (No Cache).
-- `run-new-features-benchmark.js`: Evaluates performance ROI of Single-flight Promise Coalescing and Bulk Batch Loading.
+- `run-new-features-benchmark.js`: Evaluates performance ROI of Request Coalescing (single-flight) and Bulk Batch Loading.
 - `run-miss-cache-benchmark.js`: Measures DB query reduction from miss-cache (Pattern D). Compares Direct (no cache), `maxMiss: 0` (disabled), and `maxMiss: 10000` under a cache-penetration **attack** — a high share of repeated bogus-key traffic against a small bounded pool, with the valid set pre-warmed. Workload shape is configurable via `--bogusRatio`, `--bogusPool`, `--validPool`.
 - `lib/miss-cache-workload.js`: Shared, unit-tested workload generator for the miss-cache benchmark (`makeBogusPool`, `selectKey`, `validateAttackConfig`). `validateAttackConfig` rejects workloads where bogus traffic can't repeat often enough to exercise miss-cache. Covered by `test/miss-cache-workload.test.js`.
 
@@ -191,9 +191,9 @@ Compares in-process cache lookups against direct Postgres querying via optimized
 
 ---
 
-### D. New Features Performance ROI (Promise Coalescing & Bulk Batching)
+### D. New Features Performance ROI (Request Coalescing & Bulk Batching)
 
-Compares `New Caching Logic` (Single-flight Promise Coalescing and Batch Loading enabled) against the `Old Caching Logic` and `Direct Prepared Statements (No Cache)` baseline. Results from process-isolated harness.
+Compares `New Caching Logic` (Request Coalescing (single-flight) and Batch Loading enabled) against the `Old Caching Logic` and `Direct Prepared Statements (No Cache)` baseline. Results from process-isolated harness.
 
 | Strategy | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | DB Queries | Peak Heap | Base Heap | Heap Growth | Correctness |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -214,7 +214,7 @@ Compares `New Caching Logic` (Single-flight Promise Coalescing and Batch Loading
 | **[R5] New Caching Logic** | **20,766 rps** | **11.36 ms** | **20.62 ms** | **35.42 ms** | **45,699** | **62.90 MB** | 6.18 MB | **+56.72 MB** | ✅ PASSED |
 
 ### Critical ROI Insights:
-1. **Promise Coalescing prevents Thundering Herd**: The p99 tail latency drops from **~240 ms** (old logic) to **~35–67 ms** (new logic), keeping application latencies flat under stress.
+1. **Request Coalescing prevents Thundering Herd**: The p99 tail latency drops from **~240 ms** (old logic) to **~35–67 ms** (new logic), keeping application latencies flat under stress.
 2. **Throughput Boost**: By grouping missing keys and executing bulk fetches, the throughput improves by **2.3–2.7x** (~22–25k rps vs ~9–12k rps) and DB query volume drops by ~63% (~50k vs ~135k queries).
 
 ---
@@ -258,8 +258,8 @@ A critical observation from the 5-round data is the difference in behavior betwe
 4. **Row-Exist Rate**: The ~95% figure logged in `run-load-test.js` is the **DB row-existence rate** (whether the key existed in the DB at all), not the cache hit rate.
 
 ### How D's Caching Logic Resolves the Bottleneck:
-In `run-new-features-benchmark.js` (D), we isolate the benefits of **Single-flight Promise Coalescing** and **Bulk Batch Loading (`getOrFetchMany`)**:
-1. **Promise Coalescing (Thundering Herd Protection)**: Under concurrent duplicate reads targeting the same hot keys, the cache coalesces the concurrent reads into a single database query, returning the shared result.
+In `run-new-features-benchmark.js` (D), we isolate the benefits of **Request Coalescing (single-flight)** and **Bulk Batch Loading (`getOrFetchMany`)**:
+1. **Request Coalescing (Thundering Herd Protection)**: Under concurrent duplicate reads targeting the same hot keys, the cache coalesces the concurrent reads into a single database query, returning the shared result.
 2. **Bulk Batch Loading**: For batch reads (fetching 20 keys at once), the cache groups all missed keys and fetches them in a single `WHERE uuid IN (...)` statement.
 3. **Throughput & Latency ROI**: By cutting database query volume by ~63% (**from ~135–162k queries down to ~46–54k**), the new caching logic prevents connection pool queuing. This drops the p99 latency from **~240 ms (old logic)** to **~35–67 ms (new logic)**, while boosting throughput by **2.3–2.7x** (~22–25k rps vs. ~9–12k rps).
 
@@ -297,7 +297,7 @@ All results in §5 are produced by the **process-isolated harness** (`benchmark/
 
 Below are the key patterns to use `refreshed-cache` effectively in production, with references to the benchmark results that back each claim.
 
-### Pattern A: Thundering Herd Protection (Promise Coalescing)
+### Pattern A: Thundering Herd Protection (Request Coalescing)
 **Benchmark backing:** §5D — combined with batch loading, the new caching logic drops p99 from ~240 ms to ~35–67 ms and cuts DB queries by ~63% (~50k vs ~135k). Coalescing and batching work together; their effects are not isolated separately in the benchmark.
 
 If your app experiences spikes of duplicate requests targeting the same hot keys (e.g., flash sales, breaking news), configuring `fetchByKey` automatically coalesces concurrent misses for the same key into a single database query.

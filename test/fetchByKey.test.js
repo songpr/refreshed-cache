@@ -250,5 +250,5 @@ test("fetchByKey, with missing key check repeatly", async () => {
     const startWithoutMissCache = Date.now()
     expect(await cache.getOrFetch("z")).toEqual(undefined);
     expect(Date.now() - startWithoutMissCache).toBeGreaterThanOrEqual(190); // do fetch again
-    
+    await cache.close();
 }, 10000);
