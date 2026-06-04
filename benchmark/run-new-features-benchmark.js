@@ -4,6 +4,27 @@ const { sleep, measureMemory, percentiles, resetCacheMetrics, logCacheValidation
 const { getArg, isChild, emitResult, orchestrate } = require('./lib/isolated-runner');
 
 const TOTAL_DURATION_SEC = parseInt(getArg('duration', '600'), 10);
+const NUM_WORKERS = 4;
+
+// Deterministic PRNG (mulberry32). Seeding the workload per logical request makes
+// key selection reproducible across rounds and across code changes, turning this
+// from a variance demo into a regression-grade harness. See --seed below.
+function mulberry32(seed) {
+    let a = seed >>> 0;
+    return function () {
+        a |= 0; a = (a + 0x6D2B79F5) | 0;
+        let t = Math.imul(a ^ (a >>> 15), 1 | a);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+}
+
+function median(nums) {
+    if (nums.length === 0) return 0;
+    const s = [...nums].sort((a, b) => a - b);
+    const mid = Math.floor(s.length / 2);
+    return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
 
 const connectionString = 'postgres://benchmark_user:benchmark_password@localhost:5439/benchmark_db';
 // High connection pool size to prevent connection throttling during benchmark
