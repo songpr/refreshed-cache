@@ -123,28 +123,6 @@ const STRATEGIES = [
         }
     },
     {
-        key: 'old',
-        label: 'Old Caching Logic (No Coalescing, Individual Miss Fetches)',
-        setup: async (trackedSql) => {
-            const cache = new DataCacheNoCoalescing(
-                async () => [],
-                {
-                    max: 100000,
-                    maxAge: 60,
-                    refreshAge: 60,
-                    resetOnRefresh: false,
-                    fetchByKey: async (key) => {
-                        await sleep(10); // Simulate DB response delay
-                        const [row] = await trackedSql`SELECT uuid, name, email FROM users WHERE uuid = ${key}`;
-                        return row || undefined;
-                    }
-                }
-            );
-            await cache.init();
-            return cache;
-        }
-    },
-    {
         key: 'new',
         label: 'New Caching Logic (Single-flight Coalescing & Batch Loading enabled)',
         setup: async (trackedSql) => {
