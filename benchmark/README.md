@@ -301,18 +301,18 @@ Compares `New Caching Logic` (Request Coalescing (single-flight), Batch Loading,
 
 | Strategy | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | DB Queries | Peak Heap | Base Heap | Heap Growth | Correctness |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Direct Prepared (No Cache)** | 18,815 rps | 7.02 ms | 22.25 ms | 209.81 ms | 1,686,800 | 36.81 MB | 6.23 MB | +30.58 MB | ✅ PASSED |
-| **Native lru-cache (Baseline)** | 25,397 rps | 10.85 ms | 17.96 ms | 22.30 ms | 1,146,727 | 63.54 MB | 6.28 MB | +57.26 MB | ✅ PASSED |
-| **New Caching Logic** | **25,412 rps** | **9.88 ms** | **18.01 ms** | **21.57 ms** | **1,024,161** | **66.37 MB** | 6.28 MB | **+60.09 MB** | ✅ PASSED |
+| **Direct** | 18,815 rps | 7.02 ms | 22.25 ms | 209.81 ms | 1,686,800 | 36.81 MB | 6.23 MB | +30.58 MB | ✅ PASSED |
+| **lru-cache** | 25,397 rps | 10.85 ms | 17.96 ms | 22.30 ms | 1,146,727 | 63.54 MB | 6.28 MB | +57.26 MB | ✅ PASSED |
+| **refreshed-cache** | **25,412 rps** | **9.88 ms** | **18.01 ms** | **21.57 ms** | **1,024,161** | **66.37 MB** | 6.28 MB | **+60.09 MB** | ✅ PASSED |
 
 > [!NOTE]
 > _`Est. time saved` is a counterfactual estimate (`hits × avg miss-fetch latency`), and `Hit/Fetch latency ratio` is a per-operation latency ratio — **neither is an application throughput speedup** (those are in the tables above). Both scale with the avg miss-fetch (DB round-trip) latency, and the hit side is sub-microsecond and timer-noise-bound; read them as directional diagnostics, not precise measurements (see §8)._
-> **Active Cache-Gain Metrics (New Caching Logic, Diagnosed via `cache.gain()`):**
-> * **New Caching Logic**: Est. time saved: `165,936,586.58 ms` | Hit/Fetch latency ratio (per-op, not throughput): `7,714.49x` | Active Size: `99,794` | Hit/Size Ratio: `107.68` | *Recommendation: High efficiency and near-capacity. Cache size and TTL are optimal or could be increased.*
+> **Active Cache-Gain Metrics (refreshed-cache, Diagnosed via `cache.gain()`):**
+> * **refreshed-cache**: Est. time saved: `165,936,586.58 ms` | Hit/Fetch latency ratio (per-op, not throughput): `7,714.49x` | Active Size: `99,794` | Hit/Size Ratio: `107.68` | *Recommendation: High efficiency and near-capacity. Cache size and TTL are optimal or could be increased.*
 
 ### Critical ROI Insights (Full 600s Run):
-1. **Near-Zero Overhead vs Baseline**: The `refreshed-cache` (New Caching Logic) completely matches the throughput (`~25.4k rps`) and latency (`~10ms p50`) of the raw `Native lru-cache` baseline. This proves that our promise coalescing and background refreshing add essentially **zero overhead** to the hot path over a standard LRU cache.
-2. **Reduced DB Queries via Coalescing**: Compared to the Native LRU which fires `1,146,727` queries over 10 minutes, the New Caching Logic fires only `1,024,161` queries. The single-flight coalescing successfully absorbed overlapping misses into single fetches, saving over 120,000 redundant database trips even under randomized load.
+1. **Near-Zero Overhead vs Baseline**: The **`refreshed-cache`** completely matches the throughput (`~25.4k rps`) and latency (`~10ms p50`) of the raw **`lru-cache`** baseline. This proves that our promise coalescing and background refreshing add essentially **zero overhead** to the hot path over a standard LRU cache.
+2. **Reduced DB Queries via Coalescing**: Compared to the **`lru-cache`** which fires `1,146,727` queries over 10 minutes, **`refreshed-cache`** fires only `1,024,161` queries. The single-flight coalescing successfully absorbed overlapping misses into single fetches, saving over 120,000 redundant database trips even under randomized load.
 3. **Observability & Validity Hooks have Negligible Overhead**: Enabling retrieve-time `checkValidity` (executing a structure/type check on every read) and tracking metrics (`hits`, `misses`, `coalescedFetches`, `invalidations`) incurs no observable performance penalty. The cache still performs at ~25,000+ rps with sub-millisecond overhead.
 4. **Batch Single-Flight Coalescing**: When concurrent requests trigger overlapping batch fetches (`getOrFetchMany`), keys already in-flight are coalesced rather than queried redundantly, further capping database QPS.
 

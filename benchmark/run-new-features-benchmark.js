@@ -12,10 +12,10 @@ const sql = postgres(connectionString, { max: 100 });
 // Each strategy is isolated in its own process (see lib/isolated-runner.js).
 const { LRUCache } = require('lru-cache');
 const STRATEGIES = [
-    { key: 'direct', label: 'Direct Prepared Statements (No Cache)', setup: async () => null },
+    { key: 'direct', label: 'Direct', setup: async () => null },
     {
         key: 'lru-native',
-        label: 'Native lru-cache (Baseline)',
+        label: 'lru-cache',
         setup: async (trackedSql) => {
             const lru = new LRUCache({ max: 100000, ttl: 60000 });
             let hits = 0;
@@ -67,7 +67,7 @@ const STRATEGIES = [
     },
     {
         key: 'new',
-        label: 'New Caching Logic (Single-flight Coalescing & Batch Loading enabled)',
+        label: 'refreshed-cache',
         setup: async (trackedSql) => {
             const cache = new DataCache(
                 async () => [],
@@ -320,7 +320,7 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
 
     logCacheValidation(cache, totalRequests, totalDBQueries);
     
-    if (cache && name.includes('New Caching Logic')) {
+    if (cache && name === 'refreshed-cache') {
         const g = cache.gain();
         if (g.code !== 'healthy') {
             console.error(`❌ Assertion Failed: Expected 'healthy' recommendation, got '${g.code}'`);
