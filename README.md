@@ -300,7 +300,7 @@ npm test -- --detectOpenHandles --runInBand         # open-handle diagnostics
 RUN_ROADMAP_TESTS=true npm test -- test/tdd_roadmap.test.js   # roadmap tests
 ```
 
-> **Benchmarks:** measured by a process-isolated harness against a 10M-row Postgres table. Headline numbers are cited inline in the [usage patterns](#effective-production-usage-patterns-v180-features) below; full tables and methodology live in the **[Benchmark README](benchmark/README.md)**.
+> **Benchmarks:** measured by a process-isolated harness against a 10M-row Postgres table. Headline numbers are cited inline in the [usage patterns](#effective-production-usage-patterns) below; full tables and methodology live in the **[Benchmark README](benchmark/README.md)**.
 
 ---
 
@@ -312,14 +312,16 @@ To clean up deprecated, duplicate, and sub-optimal methods in the cache API, ver
 
 ---
 
-## Effective Production Usage Patterns (v1.8.0 Features)
+## Effective Production Usage Patterns
 
-While caching strategies (like Request Coalescing and Batching) are not unique to `refreshed-cache` and exist in other tools (e.g. `lru-cache`'s native `.fetch()` API, or `dataloader`), version `1.8.0` wraps them natively within its scheduled refresh and miss-cache structures to make them easy to use.
+This section shows how to configure `refreshed-cache` for real workloads, plus the **anti-patterns** (also benchmarked) where each config backfires.
 
-These patterns demonstrate how to configure and utilize these features effectively:
+The patterns split into two groups:
+- **Core scheduled push-refresh** — the library's differentiator: Pattern C (active-only refresh) and Pattern E (scheduled refresh ahead of a known update time). These keep the hot set warm *proactively on a schedule*, so no request pays refresh latency.
+- **v1.8.0 additions** — Pattern A (request coalescing), Pattern B (bulk batching), Pattern D (miss-cache). These strategies are *not* unique to `refreshed-cache` (`lru-cache`'s native `.fetch()` coalesces; [`dataloader`](https://github.com/graphql/dataloader) batches); v1.8.0's contribution is wrapping them natively in the same store and config as the scheduled refresh above, so you don't stitch three libraries together.
 
 ### Pattern A: Thundering Herd Protection (Request Coalescing)
-**Benchmark backing:** [§5D](benchmark/README.md#d-new-features-performance-roi-request-coalescing--bulk-batching) — Single-flight coalescing drops p99 tail latency from ~240 ms (old logic, key-by-key misses) to ~35–67 ms, while cutting DB queries by ~63% (~50k vs ~135k).
+**Benchmark backing:** [§5D](benchmark/README.md#d-new-features-performance-roi-request-coalescing-bulk-batching--observability) — Single-flight coalescing drops p99 tail latency from a consistent ~240–350 ms (old logic, key-by-key misses) to ~26–67 ms in 3 of 5 rounds; the other 2 rounds spike to ~160 ms and ~425 ms under contention (the ~425 ms round was worse than that round's old-logic ~347 ms), so the win is real on the median but not guaranteed every round. DB queries drop ~63% (~50k vs ~135k).
 
 If your app experiences spikes of duplicate requests targeting the same hot keys (e.g., flash sales, breaking news), configuring `fetchByKey` automatically coalesces concurrent misses into a single database query.
 
@@ -347,7 +349,7 @@ app.get("/product/:id", async (req, res) => {
 ```
 
 ### Pattern B: Resolving N+1 Database Queries (Bulk Batch Loading)
-**Benchmark backing:** [§5D](benchmark/README.md#d-new-features-performance-roi-request-coalescing--bulk-batching) — replacing key-by-key fetches with `getOrFetchMany` + `fetchByKeys` lifts throughput **2.3–2.7x** (~22–25k rps vs ~9–12k) and cuts DB queries by ~63% (~50k vs ~135k).
+**Benchmark backing:** [§5D](benchmark/README.md#d-new-features-performance-roi-request-coalescing-bulk-batching--observability) — replacing key-by-key fetches with `getOrFetchMany` + `fetchByKeys` lifts throughput **2.3–2.7x** (~22–25k rps vs ~9–12k) and cuts DB queries by ~63% (~50k vs ~135k).
 
 When loading dashboard widgets, lists, or feeds that query multiple related entities, use `fetchByKeys` and `cache.getOrFetchMany(keys)`. This groups all missing keys and fetches them in a single batch statement (e.g. `WHERE id IN (...)`) rather than iterating key-by-key.
 
@@ -375,7 +377,7 @@ app.get("/users/bulk", async (req, res) => {
 ```
 
 ### Pattern C: Active-Only Memory-Efficient Caching (For Huge Datasets)
-**Benchmark backing:** [§5B](benchmark/README.md#b-long-running-strategy-simulation-5-rounds-max-100000) — against a 10M-row table, Active-Only Refresh holds a ~95% hit rate while firing only **~601 DB queries per 30s window** vs ~51k for lazy fetch (a **>90x** reduction), with peak heap bounded at ~44–48 MB.
+**Benchmark backing:** [§5B](benchmark/README.md#b-long-running-strategy-simulation--memory-bounding-for-huge-datasets-5-rounds-max-100000) — against a 10M-row table, Active-Only Refresh holds a ~95% hit rate while firing only **~601 DB queries per 30s window** vs ~51k for lazy fetch (a **>90x** reduction), with peak heap bounded at ~44–48 MB.
 
 When your database contains millions of records (e.g., 10M or 100M rows), caching the entire dataset in-process is impossible. Use the **Active-Only Refresh** strategy. It regularly refreshes only the keys that have been read since the last refresh interval, keeping the hot set warm while bounding memory usage.
 
@@ -419,6 +421,49 @@ const cache = new Cache(
   }
 );
 ```
+
+### Pattern E: Scheduled Refresh Ahead of a Known Update Time (Time-Aligned Freshness)
+**Benchmark backing:** [§5B](benchmark/README.md#b-long-running-strategy-simulation--memory-bounding-for-huge-datasets-5-rounds-max-100000) — refreshing only the *demonstrated* working set (`passRecentKeysOnRefresh`) holds a **~95% hit rate over a 10M-row table** while firing only **~601 DB queries per window** from a **bounded ~44 MB** hot set, with flat memory across rounds.
+
+This is `refreshed-cache`'s core moat over lazy/pull caches: when you **know** the backend changes on a schedule (nightly batch job, pricing table that updates at market open, config/feature-flag rebuild), point `refreshAt` at a wall-clock time **just after** that update. The working set is re-fetched proactively, so **no user request ever pays the refresh latency** — they hit a warm, fresh cache.
+
+The natural question is *"how do we know which keys to load, or the reloaded keys are wasted?"* You **don't guess** — set `passRecentKeysOnRefresh: true` and the refresh replays the keys demand has already revealed (the live, non-expired set). The first request for any key takes a single miss to enter the working set; from then on the scheduled refresh keeps it warm. Size `maxAge` so the hot set survives between refreshes, or it silently shrinks (see Anti-Patterns below).
+
+```javascript
+const cache = new Cache(
+  async (recentKeys) => {
+    // On the scheduled tick, reload exactly the keys that were in use.
+    // Brand-new keys are NOT pre-guessed — they enter via their first miss.
+    if (!recentKeys || recentKeys.length === 0) return [];
+    const rows = await db.query("SELECT id, data FROM pricing WHERE id = ANY($1)", [recentKeys]);
+    return rows.map(r => [r.id, r.data]);
+  },
+  {
+    max: 100000,
+    refreshAt: { days: 1, at: "02:05:00" }, // backend batch lands at 02:00 → refresh at 02:05
+    passRecentKeysOnRefresh: true,           // replay the demonstrated working set
+    resetOnRefresh: false,                   // keep unexpired entries warm across the tick
+    fetchByKey: async (id) => {              // fallback for keys outside the warm set
+      const row = await db.query("SELECT id, data FROM pricing WHERE id = $1", [id]);
+      return row || undefined;
+    }
+  }
+);
+```
+
+> **Scheduled refresh vs. batching — when to pick which.** Scheduled refresh (this pattern) hides first-request latency for a *stable, repeatedly-requested* working set, at the cost of spending one reload per cycle whether or not those keys are asked for. Batching ([Pattern B](#pattern-b-resolving-n1-database-queries-bulk-batch-loading)) does the opposite: zero wasted work, but the first caller after an update still pays the fetch. If access is **sparse or unpredictable**, prefer on-demand `getOrFetchMany`; if you know the update time **and** the hot set is re-requested every cycle, scheduled refresh wins. They compose — use `getOrFetchMany`/`fetchByKey` as the fallback path for keys outside the warm set.
+
+### Anti-Patterns (also measured)
+The same suite that backs the patterns above also pins down where they backfire. Reach for these as "don't do this" guardrails:
+
+**1. Refreshing more than demand has revealed (full/guessed preload instead of active-only).**
+**Benchmark backing:** [§5B](benchmark/README.md#b-long-running-strategy-simulation--memory-bounding-for-huge-datasets-5-rounds-max-100000) — against a 10M-row table, *Scheduled Full Refresh* and *Lazy per-key* fire **~51,000–53,000 DB queries** per run (and Full Refresh peaks at **~67 MB** heap), versus **~601 queries** and **~44 MB** for Active-Only Refresh (`passRecentKeysOnRefresh`) — a **>90×** query blowup and ~35% more peak heap for keys nobody asked for. If you try to "pre-warm" a guessed key set, those reloads are the wasted work you were worried about. Let demand populate the cache and replay `recentKeys` instead.
+
+**2. Sizing `max` below the working set.**
+**Benchmark backing:** [§5C](benchmark/README.md#c-sustained-high-concurrency-load-test-5-rounds-max-100000) — a 120k-key sliding window against a 100k `max` thrashes: constant eviction → constant per-key miss refetches, only **~25% fewer DB queries** than no cache, and p99 latency (**~210 ms**) tracking the direct baseline because the connection pool saturates. A cache smaller than the hot set is close to no cache at all — size `max` to the working set (and keep `maxAge` long enough that the set survives between refreshes, per Pattern E).
+
+**3. Reading `gain()` "speedup"/"time saved" as throughput.**
+**Benchmark backing:** [§5 methodology](benchmark/README.md#8-measurement-methodology) — `Hit/Fetch latency ratio` is a per-operation latency *ratio* and `Est. time saved` is a counterfactual estimate, both inflated by miss-fetch latency. They are diagnostics, not application speedups (real end-to-end gain is ~1.5–3×, see §A). Don't quote them as performance numbers.
 
 ---
 

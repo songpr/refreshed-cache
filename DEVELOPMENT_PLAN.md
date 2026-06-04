@@ -54,10 +54,10 @@ If a use case doesn't match that sentence, the honest recommendation is raw `lru
 
 ### Tier 1 — Finish what exists (do now, low cost, high credibility)
 - ✅ **Publish 1.8.0** to npm — done.
-- **Document `getOrFetch`, `getOrFetchMany`, single-flight, and the miss cache** in the README (they exist in code but not in the published docs).
-- **Add the "why not raw lru-cache" section** (above) verbatim to the README.
-- **Fix the benchmark harness** (see `benchmark/README.md` audit) so the numbers are defensible, then lead with the single strongest chart: equal hit-rate at ~90× fewer backend queries.
-- **TypeScript types** (`index.d.ts`). Cheap, and a hard adoption blocker for many teams today.
+- ✅ **Document `getOrFetch`, `getOrFetchMany`, single-flight, and the miss cache** in the README (they exist in code but not in the published docs).
+- ✅ **Add the "why not raw lru-cache" section** (above) verbatim to the README.
+- ✅ **Fix the benchmark harness** (see `benchmark/README.md` audit) so the numbers are defensible, then lead with the single strongest chart: equal hit-rate at ~90× fewer backend queries.
+- ✅ **TypeScript types** (`index.d.ts`). Cheap, and a hard adoption blocker for many teams today.
 
 ### Tier 2 — Sharpen the core (✅ SHIPPED in 1.8.0)
 
@@ -124,6 +124,174 @@ Expose a public method `gain()` that evaluates the cache performance benefits an
 *   `recommendation`: Sizing action feedback based on utilization and hit efficiency (e.g., advising if the cache is underutilized or needs expansion).
 
 **Cost / ROI:** ~35–55 LOC extending the existing `metrics` getter, adding the `gain()` method, and validating the `latencySampleRate` option. ROI **High** — turns the library from "fast" into "demonstrably, measurably fast per cache instance," providing operators with sizing and performance insight. Percentiles stay out of core (see §5).
+
+### Tier 2.6 — Code simplification: `index.js` (next increment)
+
+**Goal:** reduce noise in `index.js` without changing any behaviour or test outcomes. Four targeted cleanups.
+
+**1. Remove `_isAsync*` guards — replace all `isAsync ? await x : x` with plain `await x`.**
+`await` on a non-Promise value returns it unchanged, so the sync/async distinction in the code is unnecessary. Removes three `Object.defineProperty` calls (`_isAsyncFetch`, `_isAsyncFetchByKey`, `_isAsyncFetchByKeys`) and simplifies four call sites in `init`, `asyncRefresh`, `getOrFetch`, and `getOrFetchMany`.
+
+**2. Remove obvious inline comments and JSDoc on self-describing methods.**
+Delete comments that restate what the code already clearly says — `//already close`, `//if pass then timeoutLoop for the next refresh`, `//cache is not close then set timeout loop again`, the "debug only" notes on `_runInMs`/`_runAt`, the JSDoc blocks on `get`/`set`/`delete`/`clear`/`has`/`entries`, and the `asyncRefresh` property-JSDoc inside `init()`. Retain WHY comments (snapshot-before-clear rationale, first-item-consumed note, coalescing comment).
+
+**3. Fix four typos: `refrech` → `refresh`** in error-log strings inside `_timeoutLoop` and `_refreshAtLoop`.
+
+**4. Remove the `const close = true` indirection in `close()`** — use `true` directly in the `Object.defineProperty` call.
+
+**What is NOT changed:** the `Object.defineProperty` non-enumerable pattern (intentional API surface control), the first-item peek optimisation in `asyncRefresh` (prevents clearing cache on empty fetch), the `_refreshAtLoop` backoff structure (behavioural risk without targeted tests), and all latency-tracking logic.
+
+**Cost / ROI:** ~25–30 LOC net reduction, zero behaviour change. Makes the constructor and refresh loops easier to read for future contributors.
+
+---
+
+### Tier 2.7 — Benchmark gaps: three missing scenarios
+
+The current benchmark suite (`benchmark/README.md §8`) has three documented evidence gaps. Each is a new standalone script that adds to the existing suite without modifying or replacing what's there.
+
+---
+
+#### Gap 1 — Scheduled refresh: "reads cost 0 DB queries per request"
+
+**What the current suite says:** §B shows ~600 total DB queries for Strategy C over 30s at 2,000 rps. The signal is real but gets obscured by the framing (batched no-cache baseline also sits at ~600, making it look like a tie).
+
+**What's missing:** a benchmark that makes the zero-per-request property unmissable.
+
+**New script: `benchmark/run-refresh-vs-direct.js`**
+
+Three strategies, all serving the same 10k-key working set from a 10M-row DB:
+
+| Strategy | What it does | Expected DB queries for 50,000 reads |
+| :--- | :--- | :--- |
+| Direct (per-key) | `WHERE uuid=$1` on every request | ~50,000 |
+| Direct (batched) | `WHERE uuid IN (100)` per batch | ~500 |
+| Scheduled Full-Refresh | Load once at init, read from memory | **~1** (the init load only) |
+
+Add a simulated `sleep(10)` to all three DB paths (models a realistic 10 ms network round trip — the common case this library is designed for). Measure: total DB queries, total wall-clock time, p50/p99 latency. The expected outcome — "cache: 1 DB query / direct per-key: 50,000 queries / direct batched: 500 queries" — is the headline the library needs and currently cannot cite from clean data.
+
+**Why it matters:** Scheduled refresh is the #1 unique differentiator over plain `lru-cache` (see DEVELOPMENT_PLAN §1). The current suite's §B evidence for it is real but indirect. This script produces a direct, undeniable number.
+
+---
+
+#### Gap 2 — Batch loading: N+1 collapse with realistic network latency
+
+**What the current suite says:** §D shows 2.3–2.7× improvement for `getOrFetchMany` vs the old per-key path — but the "old" baseline is a hand-disabled subclass (`DataCacheNoCoalescing`), not a realistic no-cache ORM loop. The benchmark uses local Postgres (sub-ms), so the DB-latency difference between 1 query and N queries is invisible.
+
+**What's missing:** a benchmark with a realistic no-cache N+1 baseline and simulated network latency.
+
+**New script: `benchmark/run-n-plus-one.js`**
+
+Workload: render 10,000 feed pages, each needing 20 author records (simulating a social feed or a dashboard). Four strategies:
+
+| Strategy | What it does | Expected behaviour |
+| :--- | :--- | :--- |
+| ORM loop (no cache) | 20 × `SELECT ... WHERE id=$1` per page, `sleep(10)` each | 200,000 DB queries, p50 ~200 ms/page |
+| Direct batch (no cache) | 1 × `SELECT ... WHERE id IN (20)` per page, `sleep(10)` | 10,000 DB queries, p50 ~10 ms/page |
+| `getOrFetchMany` (cold cache) | Batch load misses, `sleep(10)` per batch | ~10,000 DB queries first pass, ~0 after warm |
+| `getOrFetchMany` (warm cache) | All in-memory after first pass | **~0 DB queries**, p50 <0.1 ms |
+
+Add `sleep(10)` to all DB paths. The expected outcome — "ORM loop 200k queries / batch 10k / cache warm 0" — directly backs the §9 Pattern 4 use case (social feed, dashboards). This is the benchmark that §D should have been.
+
+**Why it matters:** N+1 is the most common backend performance problem. Without this benchmark the batch-loading feature is useful but unproven against the real alternative.
+
+---
+
+#### Gap 3 — Raw `lru-cache` baseline arm
+
+**What's missing:** all baselines compare against Postgres. There is no arm that wraps `new LRUCache({ max, ttl, fetchMethod })` directly so any "vs lru-cache" throughput claim is feature-level only (see §0 caveat).
+
+**Add to `run-new-features-benchmark.js` as a fourth strategy:**
+
+```javascript
+{
+    key: 'lru-native',
+    label: 'Plain lru-cache (fetchMethod, no batching)',
+    setup: async (trackedSql) => {
+        const { LRUCache } = require('lru-cache');
+        const lru = new LRUCache({
+            max: 100000,
+            ttl: 60_000,
+            fetchMethod: async (key) => {
+                await sleep(10);
+                const [row] = await trackedSql`SELECT uuid, name, email FROM users WHERE uuid = ${key}`;
+                return row ?? undefined;
+            }
+        });
+        // Thin wrapper matching the cache.getOrFetch / getOrFetchMany API surface
+        return {
+            getOrFetch: (key) => lru.fetch(key),
+            getOrFetchMany: async (keys) => {
+                const entries = await Promise.all(keys.map(k => lru.fetch(k).then(v => [k, v])));
+                return Object.fromEntries(entries.filter(([, v]) => v !== undefined));
+            },
+            size: lru.size,
+            metrics: null,
+            close: async () => lru.clear(),
+        };
+    }
+}
+```
+
+**Expected outcome:** lru-cache's native `fetchMethod` already coalesces same-key concurrent misses — so for single-key throughput with cache hits, it should match or tie the "New Caching Logic" numbers. The gap appears in multi-key batch loading (no `fetchByKeys` equivalent) and miss-cache (no `undefined`-storage concept). This makes §D's conclusions honest.
+
+**Why it matters:** the §0 table says lru-cache has no batching or miss-cache. This baseline *proves* it rather than claiming it.
+
+---
+
+**Combined ROI:** these three scripts are self-contained additions (~150–200 LOC each). They do not touch `index.js` or any test. The payoff is turning three "analytically claimed" differentiators into benchmark-backed ones — which is the only thing standing between the library's stated positioning and its evidence.
+
+**Priority order:** Gap 1 > Gap 2 > Gap 3. Gap 1 is the most important because scheduled refresh is the library's primary differentiator over lru-cache (see §1 positioning). Gap 2 is the most impactful for adoption because N+1 is the most relatable problem. Gap 3 is needed for completeness but is lowest urgency.
+
+---
+
+### Tier 2.8 — `gain()` anti-pattern detection & advice (next increment)
+
+**Goal:** make `gain().recommendation` a *trustworthy* diagnosis that catches the three documented anti-patterns (README → "Anti-Patterns", benchmark `README.md §0`), instead of the current sizing-only heuristic that **misdiagnoses two of them**.
+
+**Defects in the current logic** (`index.js:511–516`):
+
+| Anti-pattern | Real signal | What `gain()` does today | Verdict |
+| :--- | :--- | :--- | :--- |
+| **1. Refreshing more than the hot set** (full/guessed preload) | many keys cached, few ever hit → `utilization` high **+** `hitSizeRatio` low | branches need `hitSizeRatio > 2` to flag near-capacity; a full-refresh cache at util ≈ 1.0, hitSizeRatio ≈ 0.05 falls through to **"optimal"** | ❌ false-healthy |
+| **2. `max` below the working set** (thrash) | low **hit rate** despite a full cache, high eviction churn | no hit-rate or eviction signal; thrash shows *high* `hitSizeRatio` → labeled **"High efficiency and near-capacity"** | ⚠️ right advice ("grow max"), wrong/misleading reason |
+| **3. Misreading the ratio as throughput** | — | renamed `hitVsFetchLatencyRatio` + deprecation alias + doc caveats | ✅ already handled |
+
+**Two structural gaps to close:**
+
+1. **No hit *rate*.** Recommendations key off `hitSizeRatio = hits / activeSize` — a **lifetime counter ÷ instantaneous size**, so it grows unbounded with uptime and its thresholds (`0.5`, `2`) mean different things at minute 1 vs. hour 5. Add `hitRate = hits / (hits + misses)` to `metrics` (both counters already exist) — normalized, uptime-independent, and the single most diagnostic "is this strategy working at all" number.
+2. **No waste/churn signal.** To separate "too small (thrash)" from "refreshing keys nobody reads," add a **capacity-eviction counter** via lru-cache's `dispose` callback (the only genuinely new instrumentation), and fold the `keysLoaded` vs `keysUpdated` already emitted by `onRefresh` into a cumulative refresh-waste ratio.
+
+> **✅ Verified `lru-cache` v11.5.1 `dispose` semantics (checked against installed `node_modules`, 2026-06-04):**
+> - `dispose(value, key, reason)` distinguishes the reasons we need: `DisposeReason = 'evict' | 'set' | 'delete' | 'expire' | 'fetch'`. **Capacity eviction (`'evict'`) and TTL expiry (`'expire'`) are separate reasons**, so thrash is distinguishable from normal aging. ✅
+> - **Caveat that shaped the design — TTL expiry is *lazy*.** Per the v11 docs: *"stale items are NOT preemptively removed by default … There is no pre-emptive pruning of expired items; it will treat expired items as missing when they are fetched, and delete them."* `refreshed-cache` constructs `new LRUCache({ max, ttl })` **without `ttlAutopurge`** (`index.js:133`), so a `'expire'` dispose fires only when an expired key is *touched* (a `get`) or when `purgeStale()` runs — **not at the instant of expiry.** Therefore a live `'expire'`-before-hit counter would under-count and is unreliable.
+> - **Design consequences:**
+>   1. **Thrash detection → count `reason === 'evict'` only.** This fires *synchronously* on capacity eviction regardless of the lazy-expiry caveat, so it is a reliable churn signal. No per-key "was it hit?" bookkeeping is needed — high `'evict'` churn + low `hitRate` + high `utilization` is sufficient to infer thrash, which avoids adding per-entry hit-flag state to the hot path.
+>   2. **Refresh-waste detection (anti-pattern 1) → use `onRefresh` `keysLoaded`/`keysUpdated`, NOT `'expire'` dispose.** Because expiry disposal is lazy, do not infer "keys nobody read" from `'expire'` events; derive it from the load-vs-update signal the refresh loop already emits.
+>   3. `gain()` already calls `this._cache.purgeStale()` before sampling (`index.js:500`), so `activeSize` is accurate at report time — the lazy-expiry caveat does not distort the reported size, only the would-be `'expire'` counter.
+
+**New decision tree** (replaces the 3-way branch):
+
+| Signal pattern | Diagnosis | Advice |
+| :--- | :--- | :--- |
+| hit rate low + util high + **high** evict-churn | working set > `max` (thrash) | grow `max` or shrink hot set (anti-pattern 2) |
+| util high + **low** hitSizeRatio + low churn | refreshing keys nobody reads | switch to `passRecentKeysOnRefresh` / active-only (anti-pattern 1) |
+| hit rate low + low util | cache barely helps this workload | reconsider whether to cache here |
+| hit rate high + low util | over-provisioned | shrink `max` / lower TTL (current behavior) |
+| hit rate high + util high | healthy & near capacity | grow `max` (current behavior) |
+
+**Design — extract a pure function.** Pull the mapping into a standalone `_recommend({ hitRate, utilization, hitSizeRatio, evictChurn })` that returns a stable `{ code, message }`. This makes every branch and boundary trivially unit-testable in isolation and makes the thresholds reviewable in one place. Recommendations expose a stable `code` (e.g. `"thrash"`, `"refresh-waste"`, `"healthy"`) so consumers can alert on the enum, not parse English.
+
+**Validation strategy — tests *and* a benchmark calibration witness, at different cadences.** This is the crux of the "do we need new benchmarks?" question; the honest answer is **no new benchmark script, but the existing ones must witness the thresholds**:
+
+- **Recommendation *logic* → unit tests (mandatory, every CI run).** Because `_recommend` is pure, a table-driven test asserts each branch and its boundaries (e.g. `util = 0.8` exactly, `hitRate = 0` with a full cache) deterministically, with no DB. This is the gate that would have caught the current "false optimal" defect.
+- **Threshold *validity* → calibration against existing benchmark fixtures (one-time + whenever a threshold changes — NOT a per-CI gate).** The suite already manufactures the exact states: `§C` *is* anti-pattern 2 (120k window vs 100k `max`), `§B` Strategy C *is* the healthy active-only case, `§B` Strategy A/B *is* anti-pattern 1 (loads/fetches beyond the hot set). Add a lightweight assertion to the **existing** harness — "on the §C thrash config `gain().code === 'thrash'`; on §B Strategy C it's `'healthy'`/`'optimal'`; on §B Strategy A it's `'refresh-waste'`" — so the benchmark *witnesses* that the thresholds fire on known-bad configs and stay quiet on known-good ones.
+- **Honesty caveat (ship it in the JSDoc/README).** Some recommendations are workload-dependent heuristics and cannot be "proven correct" universally. Document them as heuristics with a stable `code`, not guarantees — the same honesty bar already applied to `gain()`'s "diagnostic, not a measurement" framing.
+
+**Why no dedicated throughput benchmark (unlike Tier 2.7).** Gaps 1–3 each *prove a performance differentiator* — a new measurable characteristic. `gain()` advice introduces **no new runtime behavior to measure**; it's a diagnostic *over* existing behavior. A standalone throughput study would measure the wrong thing. The correct artifact is a correctness assertion layered onto the fixtures that already exist. Reach for a new benchmark only if a threshold itself needs empirical calibration data the current fixtures don't already produce.
+
+**Cost / ROI:** ~40–60 LOC (`hitRate` in `metrics`, `dispose` eviction counter, extracted `_recommend`, decision tree) + a table-driven unit test file + ~10 LOC of assertions in the existing benchmark harness. ROI **High** — converts `gain()` from a sizing hint that lies on two of three anti-patterns into a self-diagnosing advisor, which is the natural payoff of having documented those anti-patterns at all.
+
+---
 
 ### Tier 3 — Distributed invalidation (DEFERRED / likely cut)
 The previous plan proposed Pub/Sub + native-`fetch`/WebSocket cache sync across nodes. **Recommendation: cut, or keep as a documented integration pattern only — do not build it into the library.**

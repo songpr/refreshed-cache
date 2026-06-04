@@ -41,6 +41,9 @@ declare class DataCache<K, V> {
       maxMs: number;
     };
     timeSavedMs: number;
+    /** Per-operation latency ratio (avg miss-fetch / avg hit). Diagnostic, NOT a throughput speedup. */
+    hitVsFetchLatencyRatio: number;
+    /** @deprecated Back-compat alias for hitVsFetchLatencyRatio. */
     hitSpeedup: number;
     batchPerKeyMs: number;
     batchEfficiency: number;
@@ -59,6 +62,9 @@ declare class DataCache<K, V> {
   close(): Promise<void>;
   gain(): {
     timeSavedMs: number;
+    /** Per-operation latency ratio (avg miss-fetch / avg hit). Diagnostic, NOT a throughput speedup. */
+    hitVsFetchLatencyRatio: number;
+    /** @deprecated Back-compat alias for hitVsFetchLatencyRatio. */
     speedupFactor: number;
     activeSize: number;
     hitSizeRatio: number;

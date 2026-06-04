@@ -120,6 +120,47 @@ describe("Tier 2.5 Latency and Gain Metrics", () => {
         expect(m.batchEfficiency).toBe(0);
     });
 
+    test("timeSavedMs is never negative when hits exist but no per-key fetches occurred", async () => {
+        // Reproduces the §B "Active-Only Refresh" case: the cache is populated by a
+        // refresh loader (no fetchByKey miss-fetches), so missFetchAvgMs stays 0 while
+        // hitAvgMs is sampled > 0. The old formula hits*(0 - hitAvg) produced a bogus
+        // negative "time saved". With no fetch baseline to compare against, the honest
+        // answer is 0, never negative.
+        const cache = newCache(() => [['a', 1]], { max: 10, latencySampleRate: 1.0 });
+        await cache.init();
+
+        for (let i = 0; i < 50; i++) {
+            cache.get('a'); // pure hits, sampled -> hitAvgMs > 0
+        }
+
+        const m = cache.metrics;
+        expect(m.missFetchLatency.avgMs).toBe(0); // no per-key fetch baseline
+        expect(m.hitLatency.avgMs).toBeGreaterThan(0);
+        expect(m.timeSavedMs).toBe(0); // not negative
+        expect(cache.gain().timeSavedMs).toBeGreaterThanOrEqual(0);
+    });
+
+    test("metrics expose an honestly-named hit-vs-fetch latency ratio", async () => {
+        const cache = newCache(() => [], {
+            max: 10,
+            latencySampleRate: 1.0,
+            fetchByKey: async (key) => {
+                await new Promise(r => setTimeout(r, 10));
+                return `val-${key}`;
+            }
+        });
+        await cache.init();
+
+        await cache.getOrFetch('k1'); // one miss-fetch (~10ms baseline)
+        cache.get('k1');              // one sampled hit (sub-ms)
+
+        const m = cache.metrics;
+        // The ratio is a latency ratio (fetch / hit), NOT an application speedup.
+        expect(m.hitVsFetchLatencyRatio).toBeGreaterThan(1);
+        expect(m.hitVsFetchLatencyRatio).toBe(m.hitSpeedup); // back-compat alias
+        expect(cache.gain().hitVsFetchLatencyRatio).toBe(cache.gain().speedupFactor);
+    });
+
     test("gain() method reports correct optimization recommendations", async () => {
         // Scenario 1: Cache is disabled (max=0)
         const disabledCache = newCache(() => [], { max: 0 });

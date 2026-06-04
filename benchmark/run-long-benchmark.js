@@ -283,7 +283,7 @@ async function runStrategySimulation(name, setupCacheFn, durationSec = 80, inter
         console.log(`[Metrics Validation] DB Queries: ${totalDBQueries} | Expected: ${expectedDBQueries} (Match: ${isDbQueriesValid ? '✅' : '❌'}, saved ${expectedDBQueries - totalDBQueries} by miss-cache)`);
         console.log(`[Metrics Validation] Metrics: Hits: ${m.hits} | Misses: ${m.misses} | Coalesced: ${m.coalescedFetches} | Invalidations: ${m.invalidations} | Refreshes: ${m.refreshes} | Mismatches: ${m.mismatches}`);
         const g = cache.gain();
-        console.log(`[Metrics Validation] Gain report: Time Saved: ${g.timeSavedMs.toFixed(2)}ms | Speedup: ${g.speedupFactor.toFixed(2)}x | Active size: ${g.activeSize} | Hit/Size ratio: ${g.hitSizeRatio.toFixed(2)} | Recommendation: ${g.recommendation}`);
+        console.log(`[Metrics Validation] Gain report: Est. Time Saved: ${g.timeSavedMs.toFixed(2)}ms | Hit/Fetch latency ratio: ${g.hitVsFetchLatencyRatio.toFixed(2)}x (per-op, not throughput) | Active size: ${g.activeSize} | Hit/Size ratio: ${g.hitSizeRatio.toFixed(2)} | Recommendation: ${g.recommendation}`);
     }
 
     // Cleanup cache

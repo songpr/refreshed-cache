@@ -83,6 +83,7 @@ async function runTypeCheck() {
   assertType<number>(cache.metrics.refreshLatency.avgMs);
   assertType<number>(cache.metrics.refreshLatency.maxMs);
   assertType<number>(cache.metrics.timeSavedMs);
+  assertType<number>(cache.metrics.hitVsFetchLatencyRatio);
   assertType<number>(cache.metrics.hitSpeedup);
   assertType<number>(cache.metrics.batchPerKeyMs);
   assertType<number>(cache.metrics.batchEfficiency);
@@ -123,6 +124,7 @@ async function runTypeCheck() {
 
   const gainReport = cache.gain();
   assertType<number>(gainReport.timeSavedMs);
+  assertType<number>(gainReport.hitVsFetchLatencyRatio);
   assertType<number>(gainReport.speedupFactor);
   assertType<number>(gainReport.activeSize);
   assertType<number>(gainReport.hitSizeRatio);

@@ -81,6 +81,7 @@ expectType<{
     maxMs: number;
   };
   timeSavedMs: number;
+  hitVsFetchLatencyRatio: number;
   hitSpeedup: number;
   batchPerKeyMs: number;
   batchEfficiency: number;
@@ -114,6 +115,7 @@ expectType<boolean>(cache.has('key1'));
 expectType<Promise<void>>(cache.close());
 expectType<{
   timeSavedMs: number;
+  hitVsFetchLatencyRatio: number;
   speedupFactor: number;
   activeSize: number;
   hitSizeRatio: number;

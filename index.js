@@ -440,8 +440,17 @@ class DataCache {
         const batchPerKeyMs = avgBatchSize > 0 ? batchFetchAvgMs / avgBatchSize : 0;
         const batchEfficiency = batchPerKeyMs > 0 ? missFetchAvgMs / batchPerKeyMs : 0;
 
-        const timeSavedMs = this._hits * (missFetchAvgMs - hitAvgMs);
-        const hitSpeedup = hitAvgMs > 0 ? missFetchAvgMs / hitAvgMs : 0;
+        // timeSavedMs is a counterfactual estimate: hits * (avg miss-fetch cost - avg hit cost).
+        // It is only meaningful when there is a measured per-key fetch baseline to compare
+        // against. With no miss-fetch samples (e.g. a refresh-only/Active-Only strategy),
+        // missFetchAvgMs is 0 and the subtraction would yield a bogus negative number, so we
+        // floor the per-hit saving at 0. "Time saved" can never be negative by construction.
+        const perHitSavingMs = missFetchAvgMs > hitAvgMs ? missFetchAvgMs - hitAvgMs : 0;
+        const timeSavedMs = this._hits * perHitSavingMs;
+        // Ratio of avg miss-fetch latency to avg hit latency. This is a per-operation LATENCY
+        // ratio, NOT an application throughput speedup; treat it as a diagnostic, not a headline.
+        const hitVsFetchLatencyRatio = hitAvgMs > 0 ? missFetchAvgMs / hitAvgMs : 0;
+        const hitSpeedup = hitVsFetchLatencyRatio; // back-compat alias
 
         return {
             hits: this._hits,
@@ -469,6 +478,7 @@ class DataCache {
                 maxMs: this._refreshMaxMs !== null ? this._refreshMaxMs : 0
             },
             timeSavedMs,
+            hitVsFetchLatencyRatio,
             hitSpeedup,
             batchPerKeyMs,
             batchEfficiency
@@ -494,7 +504,9 @@ class DataCache {
 
         const m = this.metrics;
         const timeSavedMs = m.timeSavedMs;
-        const speedupFactor = m.hitSpeedup;
+        // Per-operation latency ratio (avg miss-fetch / avg hit), NOT a throughput speedup.
+        const hitVsFetchLatencyRatio = m.hitVsFetchLatencyRatio;
+        const speedupFactor = hitVsFetchLatencyRatio; // back-compat alias
 
         let recommendation = "Cache size and TTL are optimal for the current workload.";
         if (utilization < 0.2 && hitSizeRatio < 0.5) {
@@ -505,6 +517,7 @@ class DataCache {
 
         return {
             timeSavedMs,
+            hitVsFetchLatencyRatio,
             speedupFactor,
             activeSize,
             hitSizeRatio,
