@@ -82,7 +82,7 @@ function logCacheValidation(cache, totalRequests, totalDBQueries) {
 
     console.log(`[Metrics Validation] Metrics: Hits: ${m.hits} | Misses: ${m.misses} | Coalesced: ${m.coalescedFetches} | Invalidations: ${m.invalidations} | Refreshes: ${m.refreshes}`);
     const g = cache.gain();
-    console.log(`[Metrics Validation] Gain report: Est. Time Saved: ${g.timeSavedMs.toFixed(2)}ms | Hit/Fetch latency ratio: ${g.hitVsFetchLatencyRatio.toFixed(2)}x (per-op, not throughput) | Active size: ${g.activeSize} | Hit/Size ratio: ${g.hitSizeRatio.toFixed(2)} | Recommendation: ${g.recommendation}`);
+    console.log(`[Metrics Validation] Gain report: Est. Time Saved: ${g.timeSavedMs.toFixed(2)}ms | Hit/Fetch ratio: ${g.hitVsFetchLatencyRatio.toFixed(2)}x | Active size: ${g.activeSize} | Hit/Size ratio: ${g.hitSizeRatio.toFixed(2)} | Code: ${g.code} | Recommendation: ${g.recommendation}`);
 }
 
 module.exports = { sleep, measureMemory, percentiles, resetCacheMetrics, logCacheValidation };

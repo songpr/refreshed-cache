@@ -1,7 +1,7 @@
 {
   "name": "refreshed-cache",
   "description": "caching data with LRU Cache and refresh it within specified time",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "main": "index.js",
   "types": "index.d.ts",
   "scripts": {

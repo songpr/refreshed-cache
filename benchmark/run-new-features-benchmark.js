@@ -67,8 +67,61 @@ class DataCacheNoCoalescing extends DataCache {
 }
 
 // Each strategy is isolated in its own process (see lib/isolated-runner.js).
+const { LRUCache } = require('lru-cache');
 const STRATEGIES = [
     { key: 'direct', label: 'Direct Prepared Statements (No Cache)', setup: async () => null },
+    {
+        key: 'lru-native',
+        label: 'Native lru-cache (Baseline)',
+        setup: async (trackedSql) => {
+            const lru = new LRUCache({ max: 100000, ttl: 60000 });
+            let hits = 0;
+            let misses = 0;
+            return {
+                getOrFetch: async (key) => {
+                    let val = lru.get(key);
+                    if (val !== undefined) {
+                        hits++;
+                        return val;
+                    }
+                    misses++;
+                    await sleep(10);
+                    const [row] = await trackedSql`SELECT uuid, name, email FROM users WHERE uuid = ${key}`;
+                    val = row || undefined;
+                    if (val !== undefined) lru.set(key, val);
+                    return val;
+                },
+                getOrFetchMany: async (keys) => {
+                    const result = {};
+                    const missing = [];
+                    for (const k of keys) {
+                        const val = lru.get(k);
+                        if (val !== undefined) {
+                            hits++;
+                            result[k] = val;
+                        } else {
+                            misses++;
+                            missing.push(k);
+                        }
+                    }
+                    if (missing.length > 0) {
+                        await sleep(10);
+                        const rows = await trackedSql`SELECT uuid, name, email FROM users WHERE uuid IN ${trackedSql(missing)}`;
+                        for (const r of rows) {
+                            lru.set(r.uuid, r);
+                            result[r.uuid] = r;
+                        }
+                    }
+                    return result;
+                },
+                close: async () => {},
+                entries: function* () { yield* lru.entries(); },
+                get size() { return lru.size; },
+                get metrics() { return { hits, misses, coalescedFetches: 0, invalidations: 0, refreshes: 0 }; },
+                gain: () => ({ timeSavedMs: 0, hitVsFetchLatencyRatio: 0, activeSize: lru.size, hitSizeRatio: lru.size ? hits / lru.size : 0, code: 'N/A', recommendation: 'N/A' })
+            };
+        }
+    },
     {
         key: 'old',
         label: 'Old Caching Logic (No Coalescing, Individual Miss Fetches)',
@@ -345,6 +398,17 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
     }
 
     logCacheValidation(cache, totalRequests, totalDBQueries);
+    
+    if (cache && name.includes('New Caching Logic')) {
+        const g = cache.gain();
+        if (g.code !== 'healthy') {
+            console.error(`❌ Assertion Failed: Expected 'healthy' recommendation, got '${g.code}'`);
+            correctnessFailed = true;
+        } else {
+            console.log(`✅ Assertion Passed: 'healthy' recommendation witnessed.`);
+        }
+    }
+
     if (cache) {
         await cache.close();
     }
