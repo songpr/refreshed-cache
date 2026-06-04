@@ -9,63 +9,6 @@ const connectionString = 'postgres://benchmark_user:benchmark_password@localhost
 // High connection pool size to prevent connection throttling during benchmark
 const sql = postgres(connectionString, { max: 100 });
 
-// Bypassed cache subclass that disables promise coalescing (representing old caching logic)
-class DataCacheNoCoalescing extends DataCache {
-    async getOrFetch(key, _trackMetrics = true) {
-        const value = this._cache.get(key);
-        if (value !== undefined) {
-            if (_trackMetrics) this._hits++;
-            return value;
-        }
-
-        if (_trackMetrics) this._misses++;
-        if (this._fetchByKey !== undefined) {
-            if (this._missCache.peek(key) !== undefined) return undefined;
-
-            // Direct call to database bypasses coalescing map entirely
-            const newValue = this._isAsyncFetchByKey ? await this._fetchByKey(key) : this._fetchByKey(key);
-            if (newValue !== undefined) {
-                this._cache.set(key, newValue);
-            } else {
-                this._missCache.set(key, true);
-            }
-            return newValue;
-        }
-    }
-
-    async getOrFetchMany(keys) {
-        if (!Array.isArray(keys)) throw new Error("keys must be an array");
-        const result = {};
-        const missingKeys = [];
-
-        for (const key of keys) {
-            const val = this._cache.get(key);
-            if (val !== undefined) {
-                this._hits++;
-                result[key] = val;
-            } else {
-                this._misses++;
-                missingKeys.push(key);
-            }
-        }
-
-        if (missingKeys.length > 0) {
-            // Force individual getOrFetch (no batching)
-            const promises = missingKeys.map(async (key) => {
-                const val = await this.getOrFetch(key, false);
-                return [key, val];
-            });
-            const resolved = await Promise.all(promises);
-            for (const [k, v] of resolved) {
-                if (v !== undefined) {
-                    result[k] = v;
-                }
-            }
-        }
-        return result;
-    }
-}
-
 // Each strategy is isolated in its own process (see lib/isolated-runner.js).
 const { LRUCache } = require('lru-cache');
 const STRATEGIES = [
