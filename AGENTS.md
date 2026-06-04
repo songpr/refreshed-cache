@@ -145,3 +145,12 @@ All tests use **Jest**. If you introduce new features or change caching behavior
 2. **Resource Cleanup**: Always ensure that timer loops (`_timeoutLoop`, `_refreshAtLoop`) inspect `this.isClose` and terminate when `cache.close()` is called. This prevents open handles in application threads.
 3. **No Unhandled Promises**: Ensure `asyncRefresh()` calls inside timeout loops catch errors gracefully, outputting them to `console.error` to avoid crashing the parent process.
 4. **Preserve Performance Limits**: Do not exceed configured boundaries (`max` and `maxMiss`) during bulk loading and single-key fetching operations.
+
+### C. Benchmarking and Metrics Verification
+All benchmark scripts must double-collect metrics to verify their correctness under concurrent load:
+1. **Existing Way (Manual)**: Track client/driver-level database queries (`totalDBQueries`) and manually tracked requests (`totalRequests`).
+2. **Observability Hooks & Metrics**: Read the cache's internal metrics (`metrics.hits`, `metrics.misses`, `metrics.refreshes`, `metrics.coalescedFetches`).
+
+Verify both collections against each other at the end of the benchmark:
+- **Operations Verification**: `metrics.hits + metrics.misses === totalRequests` (excluding any pre-warming initialization offset).
+- **Database Query Ceiling**: `totalDBQueries <= metrics.refreshes + (metrics.misses - metrics.coalescedFetches)` must hold true, validating query reductions from promise coalescing, batch-loading, and miss-cache hits.
