@@ -112,6 +112,34 @@ A common question when inspecting the codebase is why the main class is named `D
   ```
 * **Preserving Compatibility:** Renaming `DataCache` to `RefreshedCache` inside the source files and TypeScript typings was decided against to preserve backward compatibility. Doing so would break existing applications that import the type definitions directly (`import { DataCache } ...`) or perform runtime checks (`instanceof DataCache`).
 
+### Testing Standards: Automatic Cache Teardown (Preventing Test Hangs)
+To prevent active background timers (such as `setTimeout` loops for `refreshAge` or `refreshAt`) from keeping the Node.js event loop open and causing Jest to hang when an assertion fails, **all test files must implement an automatic cleanup registry**.
+
+Every test file containing async refresh/timeout loops should follow this pattern:
+1. Maintain a module-level `activeCaches` array.
+2. Implement a `newCache` helper that registers each cache instance upon creation.
+3. Clean up all registered caches using a Jest `afterEach` hook.
+
+```javascript
+let activeCaches = [];
+afterEach(async () => {
+    for (const cache of activeCaches) {
+        try {
+            await cache.close();
+        } catch (e) {}
+    }
+    activeCaches = [];
+});
+
+function newCache(fetch, options) {
+    const cache = new DataCache(fetch, options);
+    activeCaches.push(cache);
+    return cache;
+}
+```
+This guarantees that even when an `expect()` throws an assertion exception, the timers are safely cleared during teardown.
+
+
 ---
 
 ## 5. ROI Analysis: Real-Time Latency Percentiles (p50/p95/p99) inside Core Cache Metrics
