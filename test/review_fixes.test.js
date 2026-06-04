@@ -220,11 +220,8 @@ describe('Finding 6: dead guard if (firstItdata.done != true) removed', () => {
 
 // ─── Finding 7: _runInMs used as load-bearing scheduling delay ───────────────
 describe('Finding 7: _runInMs is observability-only, delay passed explicitly', () => {
-    let cache;
-    afterEach(async () => { if (cache) { cache.isClose = true; await cache.close(); } });
-
     test('_runInMs reflects the scheduled delay for observability but is not the control-flow source', async () => {
-        cache = new DataCache(
+        const cache = newCache(
             async () => [],
             { max: 100, refreshAge: 5 }
         );
@@ -236,7 +233,7 @@ describe('Finding 7: _runInMs is observability-only, delay passed explicitly', (
 
     test('_runInMs is updated to backoff delay after a refresh failure', async () => {
         let callCount = 0;
-        cache = new DataCache(
+        const cache = newCache(
             async () => {
                 callCount++;
                 if (callCount === 1) return []; // init succeeds

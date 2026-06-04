@@ -126,7 +126,7 @@ Note: the order of items in entries is important, if the max < size of entries t
 Therefore items must be sorted by its prority, which the most important one is the first.
 ## Options
 
-* `max` The maximum size of the cache. Setting it to 0 then no data will be cached.
+* `max` The maximum size of the cache. **Setting it to `0` (or any value `≤ 0`) disables caching entirely**: `set()`, `getOrFetch()`, and `getOrFetchMany()` store nothing and `size` stays `0`. Fetches still run and return their value — `getOrFetch`/`getOrFetchMany` just don't cache the result (so every call re-fetches). `gain()` reports `code: "disabled"`.
    Default is 10000.
 
 * `maxAge` Maximum age in second. Expired items will be removed every refreshAge.
@@ -175,6 +175,8 @@ Therefore items must be sorted by its prority, which the most important one is t
     This will update the "recently used"-ness of the key.
 
     The key and val can be any type. But using object as key have to same object.
+
+    No-op when the cache is disabled (`max ≤ 0`).
 
 * `delete(key)`
 
@@ -289,7 +291,7 @@ await cache.close();
 
 **Coverage** (`npm test -- --coverage`): Statements **99.18%** · Branches **100%** · Functions **95.34%** · Lines **100%** (core `index.js` matches).
 
-**Test run** (`npm test`): **79 passed, 1 skipped** across 17 suites. Roadmap/future-feature tests are skipped by default.
+**Test run** (`npm test`): **132 passed, 1 skipped** across 26 suites. Roadmap/future-feature tests are skipped by default.
 
 **Memory & stability**: ~**305.5 bytes** per cached item (realistic string values); soak-tested over **2.5M operations** in a 5-minute high-load sequence (concurrent reads, writes, evictions, background refresh) with 0% errors and stable heap growth.
 

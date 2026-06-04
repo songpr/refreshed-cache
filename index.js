@@ -160,7 +160,13 @@ class DataCache {
                 this._windowEvictions++;
             }
         };
-        const _lruCache = new LRUCache(maxAge > 0 ? { max: max, ttl: maxAge * 1000, dispose } : { max: max, dispose })
+        // max > 0: the count bound prevents unbounded growth (with or without ttl).
+        // max <= 0 (caching disabled): lru-cache rejects { max: 0 }, and a ttl-only store
+        // emits an UNBOUNDED warning, so use a minimal valid bound and no ttl. Nothing is
+        // stored on the disabled path anyway — init/asyncRefresh short-circuit on max <= 0.
+        const _lruCache = max > 0
+            ? new LRUCache(maxAge > 0 ? { max: max, ttl: maxAge * 1000, dispose } : { max: max, dispose })
+            : new LRUCache({ max: 1, dispose });
         Object.defineProperty(this, "_cache", { get: () => _lruCache, configurable: false, enumerable: false });
         Object.defineProperty(this, "size", { get: () => _lruCache.size, configurable: false, enumerable: true });
 
@@ -591,6 +597,7 @@ class DataCache {
     }
 
     set(key, value) {
+        if (this.max <= 0) return; // caching disabled (max <= 0) — store nothing
         this._cache.set(key, value);
     }
 
@@ -665,7 +672,7 @@ class DataCache {
                     const durationMs = performance.now() - fetchStart;
                     this._updateMissFetchLatency(durationMs);
                     if (newValue !== undefined) {
-                        this._cache.set(key, newValue);
+                        if (this.max > 0) this._cache.set(key, newValue); // skip store when caching disabled
                     } else {
                         if (this._missCache !== undefined) this._missCache.set(key, true);
                     }
@@ -777,7 +784,7 @@ class DataCache {
                                 const resultMap = await batchPromise;
                                 const val = resultMap.get(k);
                                 if (val !== undefined) {
-                                    this._cache.set(k, val);
+                                    if (this.max > 0) this._cache.set(k, val); // skip store when caching disabled
                                 } else {
                                     if (this._missCache !== undefined) this._missCache.set(k, true);
                                 }
@@ -826,11 +833,16 @@ class DataCache {
         return false;
     }
     async close() {
-        if (this.isClose === true) return;
-        Object.defineProperty(this, "isClose", { get: () => true, configurable: false, enumerable: true });
+        // Clear any pending refresh timer FIRST, unconditionally — even if isClose was
+        // already set (e.g. flipped externally before close()). Otherwise the early-return
+        // below would skip clearTimeout and leave the refresh timer holding the event loop
+        // open (hanging the process / test suite).
         if (this._timeoutId) {
             clearTimeout(this._timeoutId);
+            this._timeoutId = null;
         }
+        if (this.isClose === true) return;
+        Object.defineProperty(this, "isClose", { get: () => true, configurable: false, enumerable: true });
         this._cache.clear();
     }
 
