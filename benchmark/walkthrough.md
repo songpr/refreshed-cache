@@ -79,7 +79,7 @@ We instrumented all benchmark scripts (`benchmark/run-benchmark.js`, `run-load-t
 ### New Test Suites Exposing the Capabilities
 We created four comprehensive test/benchmark-mimic suites under `test/`:
 1. `test/observability.test.js`: Verifies hits, misses, refreshes, invalidations, and value mismatch metrics and callbacks, including a 5-second concurrent soak test.
-2. `test/observability-mimic.test.js`: Specifically mimics the local/in-memory, mock-based workload shapes of all 4 benchmarks for exactly 5 seconds each, displaying the identical logging format and metrics checks.
+2. `test/observability-benchmarks.test.js`: Specifically mimics the local/in-memory, mock-based workload shapes of all 4 benchmarks for exactly 5 seconds each, displaying the identical logging format and metrics checks.
 3. `test/backoff.test.js`: Verifies exponential backoff delay calculation, capping, retry resets, and fake timer advances.
 4. `test/batchCoalescing.test.js`: Verifies that concurrent `getOrFetchMany` calls and concurrent mixed `getOrFetch` / `getOrFetchMany` calls coalesce keys and reduce backend fetches.
 
