@@ -1,6 +1,6 @@
 const postgres = require('postgres');
 const DataCache = require('../index.js');
-const { sleep, measureMemory } = require('./lib/bench-utils');
+const { sleep, measureMemory, logCacheValidation } = require('./lib/bench-utils');
 const { getArg, isChild, emitResult, orchestrate } = require('./lib/isolated-runner');
 
 const connectionString = 'postgres://benchmark_user:benchmark_password@localhost:5439/benchmark_db';
@@ -157,15 +157,8 @@ async function runScenario(scenarioName, cacheSize, dbRowsCount, totalQueries = 
     console.log(`Cache: ${cacheDuration.toFixed(0)}ms (${cacheOpsPerSec} ops/sec) | Hits found: ${cacheSuccessCount} | DB Queries: ${dbQueriesCache}`);
     console.log(`Correctness Check: ${correctnessFailed ? '❌ FAILED' : '✅ PASSED'}`);
 
-    const m = cache.metrics;
-    const isOpsValid = (m.hits + m.misses === totalQueries);
-    const expectedDBQueries = (m.refreshes || 0) + (m.misses - m.coalescedFetches);
-    const isDbQueriesValid = (dbQueriesCache <= expectedDBQueries);
-    console.log(`[Metrics Validation] Total Ops: ${totalQueries} | Metrics Hits+Misses: ${m.hits + m.misses} (Match: ${isOpsValid ? '✅' : '❌'})`);
-    console.log(`[Metrics Validation] DB Queries: ${dbQueriesCache} | Expected: ${expectedDBQueries} (Match: ${isDbQueriesValid ? '✅' : '❌'}, saved ${expectedDBQueries - dbQueriesCache} by miss-cache)`);
-    console.log(`[Metrics Validation] Metrics: Hits: ${m.hits} | Misses: ${m.misses} | Coalesced: ${m.coalescedFetches} | Invalidations: ${m.invalidations}`);
+    logCacheValidation(cache, totalQueries, dbQueriesCache);
 
-    // Clean up
     await cache.close();
 
     return {

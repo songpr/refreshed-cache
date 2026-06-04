@@ -1,6 +1,6 @@
 const postgres = require('postgres');
 const DataCache = require('../index.js');
-const { sleep, measureMemory, percentiles } = require('./lib/bench-utils');
+const { sleep, measureMemory, percentiles, resetCacheMetrics, logCacheValidation } = require('./lib/bench-utils');
 const { getArg, isChild, emitResult, orchestrate } = require('./lib/isolated-runner');
 
 const connectionString = 'postgres://benchmark_user:benchmark_password@localhost:5439/benchmark_db';
@@ -135,14 +135,7 @@ async function runStrategySimulation(name, setupCacheFn, durationSec = 80, inter
     const cache = await setupCacheFn(trackedSql);
     dbQueryCount = 0;
     totalDBQueries = 0;
-    if (cache) {
-        cache._hits = 0;
-        cache._misses = 0;
-        cache._refreshes = 0;
-        cache._coalescedFetches = 0;
-        cache._mismatches = 0;
-        cache._invalidations = 0;
-    }
+    resetCacheMetrics(cache);
 
     // Fetch 150,000 valid UUIDs from DB to use as our universe
     const allRows = await sql`SELECT uuid FROM users LIMIT 150000`;
@@ -289,6 +282,8 @@ async function runStrategySimulation(name, setupCacheFn, durationSec = 80, inter
         console.log(`[Metrics Validation] Total Ops: ${totalRequests} | Metrics Hits+Misses: ${m.hits + m.misses} (Match: ${isOpsValid ? '✅' : '❌'})`);
         console.log(`[Metrics Validation] DB Queries: ${totalDBQueries} | Expected: ${expectedDBQueries} (Match: ${isDbQueriesValid ? '✅' : '❌'}, saved ${expectedDBQueries - totalDBQueries} by miss-cache)`);
         console.log(`[Metrics Validation] Metrics: Hits: ${m.hits} | Misses: ${m.misses} | Coalesced: ${m.coalescedFetches} | Invalidations: ${m.invalidations} | Refreshes: ${m.refreshes} | Mismatches: ${m.mismatches}`);
+        const g = cache.gain();
+        console.log(`[Metrics Validation] Gain report: Time Saved: ${g.timeSavedMs.toFixed(2)}ms | Speedup: ${g.speedupFactor.toFixed(2)}x | Active size: ${g.activeSize} | Hit/Size ratio: ${g.hitSizeRatio.toFixed(2)} | Recommendation: ${g.recommendation}`);
     }
 
     // Cleanup cache

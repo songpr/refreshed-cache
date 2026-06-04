@@ -1,6 +1,6 @@
 const postgres = require('postgres');
 const DataCache = require('../index.js');
-const { sleep, measureMemory, percentiles } = require('./lib/bench-utils');
+const { sleep, measureMemory, percentiles, resetCacheMetrics, logCacheValidation } = require('./lib/bench-utils');
 const { getArg, isChild, emitResult, orchestrate } = require('./lib/isolated-runner');
 const { makeBogusPool, selectKey, validateAttackConfig } = require('./lib/miss-cache-workload');
 
@@ -163,12 +163,7 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
         }
         dbQueryCount = 0;
         totalDBQueries = 0;
-        cache._hits = 0;
-        cache._misses = 0;
-        cache._refreshes = 0;
-        cache._coalescedFetches = 0;
-        cache._mismatches = 0;
-        cache._invalidations = 0;
+        resetCacheMetrics(cache);
     }
 
     const startTime = Date.now();
@@ -259,12 +254,7 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
     await Promise.all(workerPromises);
     totalRequests += intervalRequests;
 
-    if (cache) {
-        const m = cache.metrics;
-        const isOpsValid = (m.hits + m.misses === totalRequests);
-        console.log(`[Metrics Validation] Total Ops: ${totalRequests} | Metrics Hits+Misses: ${m.hits + m.misses} (Match: ${isOpsValid ? '✅' : '❌'})`);
-        console.log(`[Metrics Validation] Metrics: Hits: ${m.hits} | Misses: ${m.misses} | Coalesced: ${m.coalescedFetches} | Invalidations: ${m.invalidations} | Refreshes: ${m.refreshes}`);
-    }
+    logCacheValidation(cache, totalRequests);
 
     if (cache) await cache.close();
 

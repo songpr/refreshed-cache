@@ -1,6 +1,6 @@
 const { expect, test } = require("@jest/globals");
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const DataCache = require("../index");
+const { delay } = require("./helpers");
 
 test("getOrFetchMany coalesces concurrent overlapping batch fetches", async () => {
     let fetchCount = 0;

@@ -18,7 +18,7 @@ This document reflects the **actual implemented state** of `refreshed-cache` (`i
 | `set` / `get` / `delete` / `clear` / `has` / `entries` | ✅ Shipped | — |
 | Test suite (~150 tests across 18 files) | ✅ Shipped | `test/` |
 
-> ⚠️ **Highest-ROI action, costs one command:** npm `latest` is **1.5.3**; this repo is at **1.8.0**. The coalescing and batch features are built but **unpublished**. `npm publish` first; everything else is secondary.
+> ✅ **Publish gate cleared:** 1.8.0 is published to npm — the coalescing, batch, observability, and backoff features are now live, not just in-repo. The §3 "does a published, honestly-documented 1.8.0 attract real users?" gate is therefore open, so Tier 2.5 work below is now actionable rather than speculative.
 
 ---
 
@@ -53,28 +53,77 @@ If a use case doesn't match that sentence, the honest recommendation is raw `lru
 ## 2. Roadmap (Scoped)
 
 ### Tier 1 — Finish what exists (do now, low cost, high credibility)
-- **Publish 1.8.0** to npm.
+- ✅ **Publish 1.8.0** to npm — done.
 - **Document `getOrFetch`, `getOrFetchMany`, single-flight, and the miss cache** in the README (they exist in code but not in the published docs).
 - **Add the "why not raw lru-cache" section** (above) verbatim to the README.
 - **Fix the benchmark harness** (see `benchmark/README.md` audit) so the numbers are defensible, then lead with the single strongest chart: equal hit-rate at ~90× fewer backend queries.
 - **TypeScript types** (`index.d.ts`). Cheap, and a hard adoption blocker for many teams today.
 
-### Tier 2 — Sharpen the core (optional, medium cost)
+### Tier 2 — Sharpen the core (✅ SHIPPED in 1.8.0)
 
-This tier focuses on operational stability and enterprise-grade reliability. Below is the justification, ROI, and real-world cases for why these features are needed:
+All three Tier 2 items are now implemented and tested. This section is kept as a record of the rationale, not as open work.
 
-*   **Observability Hooks & Metrics**
-    *   **What**: Expose counters for hits/misses/refreshes/coalesced-fetches and callbacks for `onRefresh`/`onError`.
-    *   **Why it is needed / Real-world case**: Production systems require strict monitoring of **Cache Hit Rate (CHR)**. A drop in CHR directly correlates with database latency spikes. Currently, refresh errors only output to `console.error` (`index.js:91`), which cannot be easily ingested as structured alerts in APM platforms like Datadog, Prometheus, or OpenTelemetry. Without callbacks, it is impossible to alert on persistent refresh failures or dynamically track cache health.
-    *   **ROI**: **Extremely High.** Minimal implementation cost (~50 LOC), but it is a hard prerequisite for enterprise/production readiness. SRE teams will not approve caches without metrics and alerts.
-*   **Per-Refresh Error Backoff & Jitter**
-    *   **What**: Introduce exponential backoff with random jitter on repeated `asyncRefresh` failures instead of retrying at the full `refreshAge` rate.
-    *   **Why it is needed / Real-world case**: During backend outages or network partitions, a naive cache refresh loop acts as a self-inflicted DDoS attack (a **retry storm**). If a database is overloaded and struggling to recover, constant large-scale cache refreshes from multiple application instances will keep it down indefinitely. Backoff with jitter spreads out retry attempts, allowing the downstream system to recover safely.
-    *   **ROI**: **High.** Dramatically improves downstream resilience and protects the database/APIs from cascading failures during outages.
-*   **`getOrFetchMany` Single-Flight Coalescing**
-    *   **What**: Extend single-flight coalescing to the batch path (`getOrFetchMany` / `fetchByKeys`), deduping overlapping concurrent batch fetches.
-    *   **Why it is needed / Real-world case**: Under heavy traffic (e.g., rendering a homepage or category catalog), multiple concurrent requests will ask for overlapping sets of keys simultaneously (e.g., `[item1, item2, item3]`). Currently, the batch path does not coalesce concurrent duplicate key fetches, resulting in multiple redundant queries hitting the database.
-    *   **ROI**: **Medium-High.** Resolves the thundering herd problem for batch queries, reducing database QPS by orders of magnitude for read-heavy dashboards and GraphQL endpoints.
+*   **Observability Hooks & Metrics** — ✅ **Shipped.** `metrics` getter (`index.js:396`) exposes `hits` / `misses` / `refreshes` / `coalescedFetches` / `mismatches` / `invalidations`; `onRefresh` / `onError` callbacks (`index.js:46–52`) emit structured signals for APM/alerting instead of bare `console.error`.
+    *   **Why it was needed / Real-world case**: Production systems require strict monitoring of **Cache Hit Rate (CHR)**. A drop in CHR directly correlates with database latency spikes. Without callbacks, it was impossible to alert on persistent refresh failures or dynamically track cache health.
+    *   **ROI**: **Extremely High.** Hard prerequisite for enterprise/production readiness — SRE teams will not approve caches without metrics and alerts.
+*   **Per-Refresh Error Backoff & Jitter** — ✅ **Shipped.** Exponential backoff with jitter on repeated `asyncRefresh` failures (`index.js:218`) instead of retrying at the full `refreshAge` rate.
+    *   **Why it was needed / Real-world case**: During backend outages a naive refresh loop acts as a self-inflicted DDoS (a **retry storm**), keeping an already-overloaded database down. Backoff with jitter spreads retries so the downstream can recover.
+    *   **ROI**: **High.** Protects the database/APIs from cascading failures during outages.
+*   **`getOrFetchMany` Single-Flight Coalescing** — ✅ **Shipped.** The batch path now coalesces overlapping concurrent key fetches (`index.js:576`, `index.js:640`).
+    *   **Why it was needed / Real-world case**: Under heavy traffic (rendering a homepage or category catalog) many concurrent requests ask for overlapping key sets simultaneously, previously firing redundant queries.
+    *   **ROI**: **Medium-High.** Resolves the thundering-herd problem for batch queries on read-heavy dashboards and GraphQL endpoints.
+
+### Tier 2.5 — Latency aggregates & cache-gain metrics (next increment)
+
+**Goal:** make a single read of `cache.metrics` answer two operational questions per cache — *"is this cache's backend degrading?"* and *"how much latency are we actually saving by caching?"* — without an external APM. Additionally, expose a `gain()` method that provides a comprehensive performance and sizing report during active periods.
+
+**Design — running scalars only.** No sample arrays, no sorting, no GC pressure — this sidesteps the entire §5 percentile cost analysis, which applies *only* to percentiles.
+
+The real cost on hot reads is the **clock call** (~100–240 ns per read, two calls per measurement) — not the arithmetic. min/max/avg updates are ~1–5 ns each and are not the constraint. Sampling exists specifically to skip the clock call on most reads.
+
+**Buckets — what to track per path:**
+
+| Bucket | Measured on | Hot path? | Stats tracked | Overhead |
+| :--- | :--- | :--- | :--- | :--- |
+| `hitLatency` | cache-hit read (`get` / `getOrFetch` / `getOrFetchMany` hit) | **Yes** (<0.1 ms) | **avg only** (`count` + `sumMs`) — min/max uniform/useless here | **sampled at 1%** |
+| `missFetchLatency` | single-key backend fetch (`fetchByKey`) | No (>1 ms) | min + avg + max | always-on |
+| `batchFetchLatency` | batch backend fetch (`fetchByKeys`) | No | min + avg + max | always-on |
+| `refreshLatency` | `asyncRefresh` backend work | No | min + avg + max | always-on |
+
+Hit path carries avg-only (drop min/max — hit latency is near-constant, the extremes are uninformative). Backend paths carry full min/avg/max because **tail spikes on backend calls are exactly what you need to diagnose**.
+
+**Sampling the hit path — `latencySampleRate` (default `0.01` = 1%):**
+
+```js
+// hot path — counter-based sampling, skips clock call on 99% of reads
+const sample = _trackHitLatency && (this._hitN++ % this._hitEvery === 0);
+const start = sample ? performance.now() : 0;
+const v = this._cache.get(key);
+if (sample) { this._hitCount++; this._hitSumMs += performance.now() - start; }
+```
+
+Non-sampled reads pay only `n++ % N` (~1–2 ns). Sampled reads pay the full ~150 ns. Use a counter (`% N`), not `Math.random()` — cheaper and deterministic.
+
+**Why 1% (`hitEvery = 100`)?** Hit latency is low-variance (Map lookup is near-uniform), so the average stabilises quickly.
+
+**Derived gain metrics** (computed lazily in the `metrics` getter — zero hot-path cost):
+
+*   `timeSavedMs` = `hits × (missFetchAvgMs − hitAvgMs)` — total wall-clock saved vs. always hitting the backend. The headline "gain" number. (Note: `hitAvgMs` is ~0.0001 ms and often negligible; the dominant term is `hits × missFetchAvgMs`.)
+*   `hitSpeedup` = `missFetchAvgMs / hitAvgMs` — e.g. "hits are ~2,000× faster than a single fetch."
+*   `batchPerKeyMs` = `batchFetchAvgMs / avgBatchSize` — per-key cost of a batch call.
+*   `batchEfficiency` = `missFetchAvgMs / batchPerKeyMs` — per-key win of batching vs. individual fetches (your *fetch vs. batch* and *miss vs. batch-miss* comparisons).
+
+**The `gain()` Method & Size Optimization (Active Reporting):**
+
+Expose a public method `gain()` that evaluates the cache performance benefits and recommends optimization options based on active cache size and hit-to-size ratio:
+*   `timeSavedMs`: Computed active savings.
+*   `speedupFactor`: Average backend latency vs. hit latency.
+*   `activeSize`: Current non-expired keys (obtained by calling `purgeStale()` on the cache store first).
+*   `hitSizeRatio`: `hits / activeSize` (indicates cache reuse efficiency).
+*   `utilization`: `activeSize / max`.
+*   `recommendation`: Sizing action feedback based on utilization and hit efficiency (e.g., advising if the cache is underutilized or needs expansion).
+
+**Cost / ROI:** ~35–55 LOC extending the existing `metrics` getter, adding the `gain()` method, and validating the `latencySampleRate` option. ROI **High** — turns the library from "fast" into "demonstrably, measurably fast per cache instance," providing operators with sizing and performance insight. Percentiles stay out of core (see §5).
 
 ### Tier 3 — Distributed invalidation (DEFERRED / likely cut)
 The previous plan proposed Pub/Sub + native-`fetch`/WebSocket cache sync across nodes. **Recommendation: cut, or keep as a documented integration pattern only — do not build it into the library.**
@@ -142,7 +191,9 @@ This guarantees that even when an `expect()` throws an assertion exception, the 
 
 ---
 
-## 5. ROI Analysis: Real-Time Latency Percentiles (p50/p95/p99) inside Core Cache Metrics
+## 5. ROI Analysis: Real-Time Latency *Percentiles* (p50/p95/p99) inside Core Cache Metrics
+
+> **Scope note:** This section argues against **percentiles** specifically (which require sample storage + sorting). It is *not* an argument against all latency metrics. Cheap **aggregates** — min/avg/max running scalars on the fetch/refresh path, plus a sampled hit average for savings math — are the recommended subset and are planned as **Tier 2.5** above. Read the two together: aggregates **yes**, percentiles **no**.
 
 ### Proposal: Exposing `metrics.p50`, `metrics.p95`, and `metrics.p99`
 *   **What**: Directly track the latency of read operations (`get`, `getOrFetch`, `getOrFetchMany`) inside the core cache class and expose real-time percentiles.
@@ -171,9 +222,9 @@ This guarantees that even when an `expect()` throws an assertion exception, the 
 
 ---
 
-### Strategic Recommendation: **DO NOT IMPLEMENT IN CORE**
+### Strategic Recommendation: **DO NOT IMPLEMENT PERCENTILES IN CORE**
 
-Exposing real-time latency percentiles directly inside the core library is **not recommended**. It directly contradicts the primary purpose of `refreshed-cache`: providing ultra-low-latency in-memory reads.
+Exposing real-time latency *percentiles* directly inside the core library is **not recommended** — the sample storage + sorting cost contradicts the primary purpose of `refreshed-cache`: ultra-low-latency in-memory reads. (Cheap min/avg/max aggregates do **not** carry this cost and are recommended — see Tier 2.5.)
 
 #### The Correct Architectural Pattern: **APM / Wrapper Layer**
 Latency percentiles belong in the **Application/APM layer** (using OpenTelemetry, Prometheus, Datadog, or custom middleware wrappers). APM libraries are highly optimized for this, using native bindings or lock-free metric aggregators (like HDR Histograms) that run out-of-process or asynchronously.

@@ -1,21 +1,7 @@
 const { expect } = require("@jest/globals");
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const { delay, trackCaches } = require("./helpers");
 
-let activeCaches = [];
-afterEach(async () => {
-    for (const cache of activeCaches) {
-        try {
-            await cache.close();
-        } catch (e) {}
-    }
-    activeCaches = [];
-});
-
-function newCache(fetch, options) {
-    const cache = new (require("../index"))(fetch, options);
-    activeCaches.push(cache);
-    return cache;
-}
+const newCache = trackCaches();
 
 test("manual refresh", async () => {
     const fetch = () => Object.entries({ a: 1, b: 2, c: 3 });
@@ -41,24 +27,19 @@ test("manual refresh", async () => {
     expect(cache.get("d")).toEqual(undefined);
     expect(cache.get("ee")).toEqual(undefined);
     expect(cache.size).toEqual(3);
-    await cache.close();
-    
 })
 
 test("fetch refresh cache every 1 sec", async () => {
     let round = 1;
     const fetch = () => {
-        console.log("test fetch", round)
         const entires = Object.entries({ a: 1 * round, b: 2 * round, c: 3 * round })
         round++
         return entires;
     };
     const cache = newCache(fetch, { maxAge: 1 });
     await cache.init()
-    //loop 3 round
     let i = 1
     for (; i <= 3; i++) {
-        console.log("i", i, "round", round)
         expect(cache.get("a")).toEqual(1 * i);
         expect(cache.get("b")).toEqual(2 * i);
         expect(cache.get("c")).toEqual(3 * i);
@@ -67,27 +48,20 @@ test("fetch refresh cache every 1 sec", async () => {
         expect(cache.size).toEqual(3);
         await delay(1200);
     }
-    //last round of for loop
-    console.log("i", i, "round", round)
     expect(cache.get("a")).toEqual(1 * i);
     expect(cache.get("b")).toEqual(2 * i);
     expect(cache.get("c")).toEqual(3 * i);
     expect(cache.get("d")).toEqual(undefined);
     expect(cache.get("ee")).toEqual(undefined);
-    console.log("test fetch close")
 
     await cache.asyncRefresh()
 
-    console.log("i", ++i, " manual round", round)
+    i++;
     expect(cache.get("a")).toEqual(1 * i);
     expect(cache.get("b")).toEqual(2 * i);
     expect(cache.get("c")).toEqual(3 * i);
     expect(cache.get("d")).toEqual(undefined);
     expect(cache.get("ee")).toEqual(undefined);
-    console.log("test fetch close")
-
-    await cache.close();
-    
 })
 
 test("maxAge expired, maxAge < refreshAge", async () => {
@@ -117,8 +91,6 @@ test("maxAge expired, maxAge < refreshAge", async () => {
     expect(cache.get("a")).toEqual(2);
     expect(cache.get("b")).toEqual(4);
     expect(cache.get("c")).toEqual(6);
-    await cache.close();
-    
 })
 
 test("maxAge expired, maxAge > refreshAge, resetOnRefresh=true", async () => {
@@ -157,8 +129,6 @@ test("maxAge expired, maxAge > refreshAge, resetOnRefresh=true", async () => {
     expect(cache.get("a_3")).toEqual(3);
     expect(cache.get("b_3")).toEqual(6);
     expect(cache.get("c_3")).toEqual(9);
-    await cache.close();
-    
 })
 
 test("maxAge expired, maxAge > refreshAge, resetOnRefresh = false", async () => {
@@ -211,6 +181,4 @@ test("maxAge expired, maxAge > refreshAge, resetOnRefresh = false", async () => 
     expect(cache.get("a_4")).toEqual(4);
     expect(cache.get("b_4")).toEqual(8);
     expect(cache.get("c_4")).toEqual(12);
-    await cache.close();
-    
 })

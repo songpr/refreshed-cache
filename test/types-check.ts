@@ -50,6 +50,7 @@ async function runTypeCheck() {
     },
     backoffInitialDelay: 2,
     backoffMaxDelay: 30,
+    latencySampleRate: 0.05,
   };
 
   const cache = new DataCache<string, number>(fetchFn, options);
@@ -62,6 +63,7 @@ async function runTypeCheck() {
   assertType<number>(cache.max);
   assertType<number>(cache.size);
   assertType<boolean | undefined>(cache.isClose);
+  assertType<number>(cache.latencySampleRate);
 
   // Verify metrics
   assertType<number>(cache.metrics.hits);
@@ -70,6 +72,20 @@ async function runTypeCheck() {
   assertType<number>(cache.metrics.coalescedFetches);
   assertType<number>(cache.metrics.mismatches);
   assertType<number>(cache.metrics.invalidations);
+  assertType<number>(cache.metrics.hitLatency.avgMs);
+  assertType<number>(cache.metrics.missFetchLatency.minMs);
+  assertType<number>(cache.metrics.missFetchLatency.avgMs);
+  assertType<number>(cache.metrics.missFetchLatency.maxMs);
+  assertType<number>(cache.metrics.batchFetchLatency.minMs);
+  assertType<number>(cache.metrics.batchFetchLatency.avgMs);
+  assertType<number>(cache.metrics.batchFetchLatency.maxMs);
+  assertType<number>(cache.metrics.refreshLatency.minMs);
+  assertType<number>(cache.metrics.refreshLatency.avgMs);
+  assertType<number>(cache.metrics.refreshLatency.maxMs);
+  assertType<number>(cache.metrics.timeSavedMs);
+  assertType<number>(cache.metrics.hitSpeedup);
+  assertType<number>(cache.metrics.batchPerKeyMs);
+  assertType<number>(cache.metrics.batchEfficiency);
 
   if (cache.refreshAt) {
     assertType<number>(cache.refreshAt.daysMs);
@@ -105,7 +121,14 @@ async function runTypeCheck() {
   cache.delete('key1');
   cache.clear();
 
+  const gainReport = cache.gain();
+  assertType<number>(gainReport.timeSavedMs);
+  assertType<number>(gainReport.speedupFactor);
+  assertType<number>(gainReport.activeSize);
+  assertType<number>(gainReport.hitSizeRatio);
+  assertType<number>(gainReport.utilization);
+  assertType<string>(gainReport.recommendation);
+
   await cache.asyncRefresh();
   await cache.close();
 }
-

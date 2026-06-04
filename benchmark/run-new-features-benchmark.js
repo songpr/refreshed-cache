@@ -1,6 +1,6 @@
 const postgres = require('postgres');
 const DataCache = require('../index.js');
-const { sleep, measureMemory, percentiles } = require('./lib/bench-utils');
+const { sleep, measureMemory, percentiles, resetCacheMetrics, logCacheValidation } = require('./lib/bench-utils');
 const { getArg, isChild, emitResult, orchestrate } = require('./lib/isolated-runner');
 
 const TOTAL_DURATION_SEC = parseInt(getArg('duration', '600'), 10);
@@ -156,14 +156,7 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
     const cache = await setupCacheFn(trackedSql);
     dbQueryCount = 0;
     totalDBQueries = 0;
-    if (cache) {
-        cache._hits = 0;
-        cache._misses = 0;
-        cache._refreshes = 0;
-        cache._coalescedFetches = 0;
-        cache._mismatches = 0;
-        cache._invalidations = 0;
-    }
+    resetCacheMetrics(cache);
 
     // Fetch UUID universe of 150,000 rows to simulate large key space
     const allRows = await sql`SELECT uuid FROM users LIMIT 150000`;
@@ -351,14 +344,8 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
         console.log('Direct DB Strategy (no cache to audit).');
     }
 
+    logCacheValidation(cache, totalRequests, totalDBQueries);
     if (cache) {
-        const m = cache.metrics;
-        const isOpsValid = (m.hits + m.misses === totalRequests);
-        const expectedDBQueries = (m.refreshes || 0) + (m.misses - m.coalescedFetches);
-        const isDbQueriesValid = (totalDBQueries <= expectedDBQueries);
-        console.log(`[Metrics Validation] Total Ops: ${totalRequests} | Metrics Hits+Misses: ${m.hits + m.misses} (Match: ${isOpsValid ? '✅' : '❌'})`);
-        console.log(`[Metrics Validation] DB Queries: ${totalDBQueries} | Expected: ${expectedDBQueries} (Match: ${isDbQueriesValid ? '✅' : '❌'}, saved ${expectedDBQueries - totalDBQueries} by miss-cache)`);
-        console.log(`[Metrics Validation] Metrics: Hits: ${m.hits} | Misses: ${m.misses} | Coalesced: ${m.coalescedFetches} | Invalidations: ${m.invalidations}`);
         await cache.close();
     }
     const finalMem = await measureMemory();

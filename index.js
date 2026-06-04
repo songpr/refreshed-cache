@@ -1,5 +1,6 @@
 const util = require('util');
 const { LRUCache } = require("lru-cache");
+const { performance } = require('perf_hooks');
 const timeAtRegex = /^(2[0-3]|1[0-9]|0?[0-9]):([1-5][0-9]|0?[0-9]):([1-5][0-9]|0?[0-9])$/
 const aDayInMS = 24 * 60 * 60 * 1000;
 function nowMsFrom00_00() {
@@ -102,6 +103,33 @@ class DataCache {
         Object.defineProperty(this, "refreshAge", { get: () => refreshAge, configurable: false, enumerable: true });
         Object.defineProperty(this, "resetOnRefresh", { get: () => resetOnRefresh, configurable: false, enumerable: true });
         Object.defineProperty(this, "max", { get: () => max, configurable: false, enumerable: true });
+
+        const latencySampleRate = options.latencySampleRate === undefined ? 0.01 : options.latencySampleRate;
+        if (typeof latencySampleRate !== 'number' || latencySampleRate < 0 || latencySampleRate > 1 || Number.isNaN(latencySampleRate)) {
+            throw new Error("Invalid latencySampleRate");
+        }
+        Object.defineProperty(this, "latencySampleRate", { get: () => latencySampleRate, configurable: false, enumerable: true });
+
+        Object.defineProperty(this, "_hitN", { value: 0, writable: true, configurable: false, enumerable: false });
+        Object.defineProperty(this, "_hitEvery", { value: latencySampleRate > 0 ? Math.round(1 / latencySampleRate) : Infinity, writable: true, configurable: false, enumerable: false });
+        Object.defineProperty(this, "_hitCount", { value: 0, writable: true, configurable: false, enumerable: false });
+        Object.defineProperty(this, "_hitSumMs", { value: 0, writable: true, configurable: false, enumerable: false });
+
+        Object.defineProperty(this, "_missFetchMinMs", { value: null, writable: true, configurable: false, enumerable: false });
+        Object.defineProperty(this, "_missFetchMaxMs", { value: null, writable: true, configurable: false, enumerable: false });
+        Object.defineProperty(this, "_missFetchSumMs", { value: 0, writable: true, configurable: false, enumerable: false });
+        Object.defineProperty(this, "_missFetchCount", { value: 0, writable: true, configurable: false, enumerable: false });
+
+        Object.defineProperty(this, "_batchFetchMinMs", { value: null, writable: true, configurable: false, enumerable: false });
+        Object.defineProperty(this, "_batchFetchMaxMs", { value: null, writable: true, configurable: false, enumerable: false });
+        Object.defineProperty(this, "_batchFetchSumMs", { value: 0, writable: true, configurable: false, enumerable: false });
+        Object.defineProperty(this, "_batchFetchCount", { value: 0, writable: true, configurable: false, enumerable: false });
+        Object.defineProperty(this, "_batchFetchKeysCount", { value: 0, writable: true, configurable: false, enumerable: false });
+
+        Object.defineProperty(this, "_refreshMinMs", { value: null, writable: true, configurable: false, enumerable: false });
+        Object.defineProperty(this, "_refreshMaxMs", { value: null, writable: true, configurable: false, enumerable: false });
+        Object.defineProperty(this, "_refreshSumMs", { value: 0, writable: true, configurable: false, enumerable: false });
+        Object.defineProperty(this, "_refreshCount", { value: 0, writable: true, configurable: false, enumerable: false });
         const _lruCache = new LRUCache(maxAge > 0 ? { max: max, ttl: maxAge * 1000 } : { max: max })
         Object.defineProperty(this, "_cache", { get: () => _lruCache, configurable: false, enumerable: false });
         Object.defineProperty(this, "size", { get: () => _lruCache.size, configurable: false, enumerable: true });
@@ -249,12 +277,9 @@ class DataCache {
             }
             , configurable: false, enumerable: false, writable: false
         });
-        //getOrRefresh option
-        const fetchByKey = options.fetchByKey;
-        if (typeof (fetchByKey) === "function") {
-            Object.defineProperty(this, "_fetchByKey", { value: fetchByKey, configurable: false, enumerable: false, writable: false });
-            const _isAsyncFetchByKey = util.types.isAsyncFunction(fetchByKey);
-            Object.defineProperty(this, "_isAsyncFetchByKey", { get: () => _isAsyncFetchByKey, configurable: false, enumerable: false });
+        // Configure the miss cache once, shared by fetchByKey and fetchByKeys.
+        const setupMissCache = () => {
+            if ('maxMiss' in this) return;
             const maxMiss = options.maxMiss === undefined ? 2000 : options.maxMiss;
             if (!Number.isInteger(maxMiss) || maxMiss < 0) throw new Error("Invalid maxMiss");
             const maxAgeMiss = options.maxAgeMiss === undefined ? refreshAge : options.maxAgeMiss;
@@ -265,6 +290,14 @@ class DataCache {
                 const _missLRUCache = new LRUCache(maxAgeMiss > 0 ? { max: maxMiss, ttl: maxAgeMiss * 1000 } : { max: maxMiss })
                 Object.defineProperty(this, "_missCache", { get: () => _missLRUCache, configurable: false, enumerable: false });
             }
+        };
+
+        const fetchByKey = options.fetchByKey;
+        if (typeof (fetchByKey) === "function") {
+            Object.defineProperty(this, "_fetchByKey", { value: fetchByKey, configurable: false, enumerable: false, writable: false });
+            const _isAsyncFetchByKey = util.types.isAsyncFunction(fetchByKey);
+            Object.defineProperty(this, "_isAsyncFetchByKey", { get: () => _isAsyncFetchByKey, configurable: false, enumerable: false });
+            setupMissCache();
         }
 
         const fetchByKeys = options.fetchByKeys;
@@ -272,18 +305,7 @@ class DataCache {
             Object.defineProperty(this, "_fetchByKeys", { value: fetchByKeys, configurable: false, enumerable: false, writable: false });
             const _isAsyncFetchByKeys = util.types.isAsyncFunction(fetchByKeys);
             Object.defineProperty(this, "_isAsyncFetchByKeys", { get: () => _isAsyncFetchByKeys, configurable: false, enumerable: false });
-            if (!('maxMiss' in this)) {
-                const maxMiss = options.maxMiss === undefined ? 2000 : options.maxMiss;
-                if (!Number.isInteger(maxMiss) || maxMiss < 0) throw new Error("Invalid maxMiss");
-                const maxAgeMiss = options.maxAgeMiss === undefined ? refreshAge : options.maxAgeMiss;
-                if (!Number.isInteger(maxAgeMiss) || maxAgeMiss < 0) throw new Error("Invalid maxAgeMiss");
-                Object.defineProperty(this, "maxMiss", { get: () => maxMiss, configurable: false, enumerable: true });
-                Object.defineProperty(this, "maxAgeMiss", { get: () => maxAgeMiss, configurable: false, enumerable: true });
-                if (maxMiss > 0) {
-                    const _missLRUCache = new LRUCache(maxAgeMiss > 0 ? { max: maxMiss, ttl: maxAgeMiss * 1000 } : { max: maxMiss })
-                    Object.defineProperty(this, "_missCache", { get: () => _missLRUCache, configurable: false, enumerable: false });
-                }
-            }
+            setupMissCache();
         }
 
         Object.defineProperty(this, "_pendingFetches", { value: new Map(), configurable: false, enumerable: false });
@@ -298,14 +320,12 @@ class DataCache {
         }
 
         const asyncRefresh = async () => {
-            if (this.max <= 0) return;// max <=0 then do not refresh since it cannot cache
-            const startTime = Date.now();
+            if (this.max <= 0) return; // nothing to refresh when caching is disabled
+            const startTime = performance.now();
             const recentKeys = [];
             if (this.size > 0) {
-                //get recent keys to referesh thier value, the expired key will not be included, and this function do not change recently ness 
-                this._cache.forEach((value, key, cache) => {
-                    recentKeys.push(key);
-                });
+                // forEach skips expired keys and does not bump recency
+                this._cache.forEach((value, key) => recentKeys.push(key));
             }
             const dataIterator = this._isAsyncFetch ? await this._fetch(this.passRecentKeysOnRefresh ? recentKeys : undefined) : this._fetch(this.passRecentKeysOnRefresh ? recentKeys : undefined);
             const isIterator = Symbol.iterator in Object(dataIterator);
@@ -315,71 +335,57 @@ class DataCache {
             const firstItdata = isAsyncIterator ? await nextIterator.next() : nextIterator.next();
             
             if (firstItdata.done || !Array.isArray(firstItdata.value)) {
+                const durationMs = performance.now() - startTime;
+                this._updateRefreshLatency(durationMs);
                 this._refreshes++;
                 if (this._onRefresh) {
-                    this._onRefresh({ durationMs: Date.now() - startTime, keysLoaded: 0, keysUpdated: 0 });
+                    this._onRefresh({ durationMs, keysLoaded: 0, keysUpdated: 0 });
                 }
-                return;//no data
+                return; // fetch yielded no data
             }
             
             const firstItem = { key: firstItdata.value[0], value: firstItdata.value[1] };
             let keysUpdated = 0;
-            let oldValues = null;
 
+            // Snapshot prior values so we can detect changed keys. In reset mode we
+            // clear the cache up front, so the snapshot Map is the only old-value
+            // source; otherwise we read live from the (stale-pruned) cache.
+            let oldValues;
             if (this.resetOnRefresh == true) {
                 oldValues = new Map();
-                this._cache.forEach((v, k) => {
-                    oldValues.set(k, v);
-                });
-                
-                const hasOld = oldValues.has(firstItem.key);
-                const oldVal = oldValues.get(firstItem.key);
-                if (hasOld && !this._isEqual(oldVal, firstItem.value)) {
-                    keysUpdated++;
-                    this._mismatches++;
-                }
-                //no need to prune since it all
-                this._cache.clear();//reset on each refresh
+                this._cache.forEach((v, k) => oldValues.set(k, v));
+                this._cache.clear();
             } else {
-                this._cache.purgeStale()// remove expired items before insert new fetch so left only non expired recently use cache items.
-                
-                const hasOld = this._cache.has(firstItem.key);
-                const oldVal = this._cache.peek(firstItem.key);
-                if (hasOld && !this._isEqual(oldVal, firstItem.value)) {
-                    keysUpdated++;
-                    this._mismatches++;
-                }
+                this._cache.purgeStale();
+                oldValues = this._cache;
             }
+            const countMismatch = (key, newValue) => {
+                if (oldValues.has(key)) {
+                    const oldVal = oldValues instanceof Map ? oldValues.get(key) : oldValues.peek(key);
+                    if (!this._isEqual(oldVal, newValue)) {
+                        keysUpdated++;
+                        this._mismatches++;
+                    }
+                }
+            };
+
+            countMismatch(firstItem.key, firstItem.value);
             if (this._missCache !== undefined) this._missCache.purgeStale();
             this._cache.set(firstItem.key, firstItem.value);
-            
-            let i = 1; //start from 1 since we already read 1
-            //async iterator
-            for await (const [key, value] of nextIterator) {
-                    if (i >= this.max) break; // add items do not exceed max
-                    i++;
-                    
-                    if (this.resetOnRefresh == true) {
-                        const hasOld = oldValues.has(key);
-                        const oldVal = oldValues.get(key);
-                        if (hasOld && !this._isEqual(oldVal, value)) {
-                            keysUpdated++;
-                            this._mismatches++;
-                        }
-                    } else {
-                        const hasOld = this._cache.has(key);
-                        const oldVal = this._cache.peek(key);
-                        if (hasOld && !this._isEqual(oldVal, value)) {
-                            keysUpdated++;
-                            this._mismatches++;
-                        }
-                    }
-                    this._cache.set(key, value);
-                }
 
+            let i = 1; // first item already consumed above
+            for await (const [key, value] of nextIterator) {
+                if (i >= this.max) break;
+                i++;
+                countMismatch(key, value);
+                this._cache.set(key, value);
+            }
+
+            const durationMs = performance.now() - startTime;
+            this._updateRefreshLatency(durationMs);
             this._refreshes++;
             if (this._onRefresh) {
-                this._onRefresh({ durationMs: Date.now() - startTime, keysLoaded: i, keysUpdated });
+                this._onRefresh({ durationMs, keysLoaded: i, keysUpdated });
             }
         }
         /**
@@ -393,14 +399,117 @@ class DataCache {
             await this._timeoutLoop(asyncRefresh, this.refreshAge * 1000);
         }
     }
+    // Evict an item that failed checkValidity, mirror the eviction into the miss
+    // cache, and record it as both an invalidation and a miss.
+    _invalidate(key) {
+        this._cache.delete(key);
+        if (this._missCache !== undefined) this._missCache.delete(key);
+        this._invalidations++;
+        this._misses++;
+    }
+
+    _updateMissFetchLatency(ms) {
+        this._missFetchCount++;
+        this._missFetchSumMs += ms;
+        if (this._missFetchMinMs === null || ms < this._missFetchMinMs) this._missFetchMinMs = ms;
+        if (this._missFetchMaxMs === null || ms > this._missFetchMaxMs) this._missFetchMaxMs = ms;
+    }
+
+    _updateBatchFetchLatency(ms, keysCount) {
+        this._batchFetchCount++;
+        this._batchFetchSumMs += ms;
+        this._batchFetchKeysCount += keysCount;
+        if (this._batchFetchMinMs === null || ms < this._batchFetchMinMs) this._batchFetchMinMs = ms;
+        if (this._batchFetchMaxMs === null || ms > this._batchFetchMaxMs) this._batchFetchMaxMs = ms;
+    }
+
+    _updateRefreshLatency(ms) {
+        this._refreshCount++;
+        this._refreshSumMs += ms;
+        if (this._refreshMinMs === null || ms < this._refreshMinMs) this._refreshMinMs = ms;
+        if (this._refreshMaxMs === null || ms > this._refreshMaxMs) this._refreshMaxMs = ms;
+    }
+
     get metrics() {
+        const hitAvgMs = this._hitCount > 0 ? this._hitSumMs / this._hitCount : 0;
+        const missFetchAvgMs = this._missFetchCount > 0 ? this._missFetchSumMs / this._missFetchCount : 0;
+        const batchFetchAvgMs = this._batchFetchCount > 0 ? this._batchFetchSumMs / this._batchFetchCount : 0;
+        const refreshAvgMs = this._refreshCount > 0 ? this._refreshSumMs / this._refreshCount : 0;
+
+        const avgBatchSize = this._batchFetchCount > 0 ? this._batchFetchKeysCount / this._batchFetchCount : 0;
+        const batchPerKeyMs = avgBatchSize > 0 ? batchFetchAvgMs / avgBatchSize : 0;
+        const batchEfficiency = batchPerKeyMs > 0 ? missFetchAvgMs / batchPerKeyMs : 0;
+
+        const timeSavedMs = this._hits * (missFetchAvgMs - hitAvgMs);
+        const hitSpeedup = hitAvgMs > 0 ? missFetchAvgMs / hitAvgMs : 0;
+
         return {
             hits: this._hits,
             misses: this._misses,
             refreshes: this._refreshes,
             coalescedFetches: this._coalescedFetches,
             mismatches: this._mismatches,
-            invalidations: this._invalidations
+            invalidations: this._invalidations,
+            hitLatency: {
+                avgMs: hitAvgMs
+            },
+            missFetchLatency: {
+                minMs: this._missFetchMinMs !== null ? this._missFetchMinMs : 0,
+                avgMs: missFetchAvgMs,
+                maxMs: this._missFetchMaxMs !== null ? this._missFetchMaxMs : 0
+            },
+            batchFetchLatency: {
+                minMs: this._batchFetchMinMs !== null ? this._batchFetchMinMs : 0,
+                avgMs: batchFetchAvgMs,
+                maxMs: this._batchFetchMaxMs !== null ? this._batchFetchMaxMs : 0
+            },
+            refreshLatency: {
+                minMs: this._refreshMinMs !== null ? this._refreshMinMs : 0,
+                avgMs: refreshAvgMs,
+                maxMs: this._refreshMaxMs !== null ? this._refreshMaxMs : 0
+            },
+            timeSavedMs,
+            hitSpeedup,
+            batchPerKeyMs,
+            batchEfficiency
+        };
+    }
+
+    gain() {
+        if (this.max === 0) {
+            return {
+                timeSavedMs: 0,
+                speedupFactor: 0,
+                activeSize: 0,
+                hitSizeRatio: 0,
+                utilization: 0,
+                recommendation: "Cache is disabled (max=0)."
+            };
+        }
+
+        this._cache.purgeStale();
+        const activeSize = this._cache.size;
+        const utilization = activeSize / this.max;
+        const hitSizeRatio = activeSize > 0 ? this._hits / activeSize : 0;
+
+        const m = this.metrics;
+        const timeSavedMs = m.timeSavedMs;
+        const speedupFactor = m.hitSpeedup;
+
+        let recommendation = "Cache size and TTL are optimal for the current workload.";
+        if (utilization < 0.2 && hitSizeRatio < 0.5) {
+            recommendation = "Cache is underutilized. Consider decreasing max size or lowering TTL.";
+        } else if (utilization > 0.8 && hitSizeRatio > 2) {
+            recommendation = "High efficiency and near-capacity. Consider increasing max size to capture more hits.";
+        }
+
+        return {
+            timeSavedMs,
+            speedupFactor,
+            activeSize,
+            hitSizeRatio,
+            utilization,
+            recommendation
         };
     }
 
@@ -413,16 +522,19 @@ class DataCache {
      * @returns 
      */
     get(key) {
+        const sample = this.latencySampleRate > 0 && (this._hitN++ % this._hitEvery === 0);
+        const start = sample ? performance.now() : 0;
         const val = this._cache.get(key);
         if (val !== undefined) {
             if (this._checkValidity && !this._checkValidity(key, val)) {
-                this._cache.delete(key);
-                if (this._missCache !== undefined) this._missCache.delete(key);
-                this._invalidations++;
-                this._misses++;
+                this._invalidate(key);
                 return undefined;
             }
             this._hits++;
+            if (sample) {
+                this._hitCount++;
+                this._hitSumMs += performance.now() - start;
+            }
             return val;
         }
         this._misses++;
@@ -449,7 +561,6 @@ class DataCache {
      */
     delete(key) {
         this._cache.delete(key);
-        //remove miss cache too. since we remove key from cache
         if (this._missCache != null) this._missCache.delete(key);
     }
 
@@ -461,7 +572,6 @@ class DataCache {
      */
     clear() {
         this._cache.clear();
-        //clear miss cache too. since we clear keys from cache
         if (this._missCache != null) this._missCache.clear();
     }
 
@@ -477,10 +587,12 @@ class DataCache {
      * get cache value by key, if it's not found try to get item using fetchByKey, return undefined if not found.
      * 
      * If fetchByKey throw exception this will throw exception as well.
-     * @param {*} key 
-     * @returns value ehn
+     * @param {*} key
+     * @returns
      */
     async getOrFetch(key, _trackMetrics = true) {
+        const sample = _trackMetrics && this.latencySampleRate > 0 && (this._hitN++ % this._hitEvery === 0);
+        const start = sample ? performance.now() : 0;
         let value = this._cache.get(key);
         if (value !== undefined) {
             if (this._checkValidity && !this._checkValidity(key, value)) {
@@ -491,6 +603,10 @@ class DataCache {
                 value = undefined;
             } else {
                 if (_trackMetrics) this._hits++;
+                if (sample) {
+                    this._hitCount++;
+                    this._hitSumMs += performance.now() - start;
+                }
                 return value;
             }
         } else {
@@ -508,9 +624,12 @@ class DataCache {
             }
 
             let resolvedSync = false;
+            const fetchStart = performance.now();
             const fetchPromise = (async () => {
                 try {
                     const newValue = this._isAsyncFetchByKey ? await this._fetchByKey(key) : this._fetchByKey(key);
+                    const durationMs = performance.now() - fetchStart;
+                    this._updateMissFetchLatency(durationMs);
                     if (newValue !== undefined) {
                         this._cache.set(key, newValue);
                     } else {
@@ -542,16 +661,19 @@ class DataCache {
         const missingKeys = [];
 
         for (const key of keys) {
+            const sample = this.latencySampleRate > 0 && (this._hitN++ % this._hitEvery === 0);
+            const start = sample ? performance.now() : 0;
             let val = this._cache.get(key);
             if (val !== undefined) {
                 if (this._checkValidity && !this._checkValidity(key, val)) {
-                    this._cache.delete(key);
-                    if (this._missCache !== undefined) this._missCache.delete(key);
-                    this._invalidations++;
-                    this._misses++;
+                    this._invalidate(key);
                     missingKeys.push(key);
                 } else {
                     this._hits++;
+                    if (sample) {
+                        this._hitCount++;
+                        this._hitSumMs += performance.now() - start;
+                    }
                     result[key] = val;
                 }
             } else {
@@ -588,9 +710,12 @@ class DataCache {
                     }
 
                     if (keysToFetch.length > 0) {
+                        const fetchStart = performance.now();
                         const batchPromise = (async () => {
                             try {
                                 const fetchedData = this._isAsyncFetchByKeys ? await this._fetchByKeys(keysToFetch) : this._fetchByKeys(keysToFetch);
+                                const durationMs = performance.now() - fetchStart;
+                                this._updateBatchFetchLatency(durationMs, keysToFetch.length);
                                 const resultMap = new Map();
                                 if (fetchedData) {
                                     if (typeof fetchedData[Symbol.asyncIterator] === "function") {
@@ -662,10 +787,7 @@ class DataCache {
         const val = this._cache.peek(key);
         if (val !== undefined) {
             if (this._checkValidity && !this._checkValidity(key, val)) {
-                this._cache.delete(key);
-                if (this._missCache !== undefined) this._missCache.delete(key);
-                this._invalidations++;
-                this._misses++;
+                this._invalidate(key);
                 return false;
             }
             return true;

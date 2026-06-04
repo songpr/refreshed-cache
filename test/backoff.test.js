@@ -1,7 +1,6 @@
 const { expect, test } = require("@jest/globals");
 const DataCache = require("../index");
-
-const flushPromises = () => new Promise(resolve => jest.requireActual("timers").setImmediate(resolve));
+const { flushPromises } = require("./helpers");
 
 test("exponential backoff with jitter on refresh errors", async () => {
     jest.useFakeTimers();

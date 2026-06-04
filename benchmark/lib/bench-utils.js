@@ -49,4 +49,40 @@ function percentiles(latencies) {
     };
 }
 
-module.exports = { sleep, measureMemory, percentiles };
+/**
+ * Zero the cache counters bumped during warmup/setup so the measured window
+ * starts clean. No-op when cache is null (e.g. the direct/no-cache baseline).
+ */
+function resetCacheMetrics(cache) {
+    if (!cache) return;
+    cache._hits = 0;
+    cache._misses = 0;
+    cache._refreshes = 0;
+    cache._coalescedFetches = 0;
+    cache._mismatches = 0;
+    cache._invalidations = 0;
+}
+
+/**
+ * Print the standard metrics-validation footer shared by every benchmark:
+ * ops accounting, expected-vs-actual DB queries, raw counters, and the gain report.
+ * Pass totalDBQueries to enable the DB-query reconciliation line.
+ */
+function logCacheValidation(cache, totalRequests, totalDBQueries) {
+    if (!cache) return;
+    const m = cache.metrics;
+    const isOpsValid = (m.hits + m.misses === totalRequests);
+    console.log(`[Metrics Validation] Total Ops: ${totalRequests} | Metrics Hits+Misses: ${m.hits + m.misses} (Match: ${isOpsValid ? '✅' : '❌'})`);
+
+    if (totalDBQueries !== undefined) {
+        const expectedDBQueries = (m.refreshes || 0) + (m.misses - m.coalescedFetches);
+        const isDbQueriesValid = (totalDBQueries <= expectedDBQueries);
+        console.log(`[Metrics Validation] DB Queries: ${totalDBQueries} | Expected: ${expectedDBQueries} (Match: ${isDbQueriesValid ? '✅' : '❌'}, saved ${expectedDBQueries - totalDBQueries} by miss-cache)`);
+    }
+
+    console.log(`[Metrics Validation] Metrics: Hits: ${m.hits} | Misses: ${m.misses} | Coalesced: ${m.coalescedFetches} | Invalidations: ${m.invalidations} | Refreshes: ${m.refreshes}`);
+    const g = cache.gain();
+    console.log(`[Metrics Validation] Gain report: Time Saved: ${g.timeSavedMs.toFixed(2)}ms | Speedup: ${g.speedupFactor.toFixed(2)}x | Active size: ${g.activeSize} | Hit/Size ratio: ${g.hitSizeRatio.toFixed(2)} | Recommendation: ${g.recommendation}`);
+}
+
+module.exports = { sleep, measureMemory, percentiles, resetCacheMetrics, logCacheValidation };

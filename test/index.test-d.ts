@@ -52,6 +52,7 @@ expectType<boolean>(cache.resetOnRefresh);
 expectType<number>(cache.max);
 expectType<number>(cache.size);
 expectType<boolean | undefined>(cache.isClose);
+expectType<number>(cache.latencySampleRate);
 
 // Test metrics properties
 expectType<{
@@ -61,6 +62,28 @@ expectType<{
   coalescedFetches: number;
   mismatches: number;
   invalidations: number;
+  hitLatency: {
+    avgMs: number;
+  };
+  missFetchLatency: {
+    minMs: number;
+    avgMs: number;
+    maxMs: number;
+  };
+  batchFetchLatency: {
+    minMs: number;
+    avgMs: number;
+    maxMs: number;
+  };
+  refreshLatency: {
+    minMs: number;
+    avgMs: number;
+    maxMs: number;
+  };
+  timeSavedMs: number;
+  hitSpeedup: number;
+  batchPerKeyMs: number;
+  batchEfficiency: number;
 }>(cache.metrics);
 
 if (cache.refreshAt) {
@@ -89,6 +112,14 @@ expectType<Promise<number | undefined>>(cache.getOrFetch('key1'));
 expectType<Promise<Record<any, number>>>(cache.getOrFetchMany(['key1', 'key2']));
 expectType<boolean>(cache.has('key1'));
 expectType<Promise<void>>(cache.close());
+expectType<{
+  timeSavedMs: number;
+  speedupFactor: number;
+  activeSize: number;
+  hitSizeRatio: number;
+  utilization: number;
+  recommendation: string;
+}>(cache.gain());
 
 // 5. Test type error cases
 // Expect error on invalid constructor arguments

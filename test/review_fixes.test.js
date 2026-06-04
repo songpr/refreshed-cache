@@ -3,16 +3,16 @@
  * Each describe block covers one finding from reviews/feature-tier-2-sharpen-core.md.
  */
 const DataCache = require('../index.js');
+const { flushPromises, trackCaches } = require('./helpers');
+
+const newCache = trackCaches();
 
 // ─── Finding 1: keysLoaded off-by-one when fetch exceeds max ─────────────────
 describe('Finding 1: keysLoaded off-by-one when fetch exceeds max', () => {
-    let cache;
-    afterEach(async () => { if (cache) await cache.close(); });
-
     test('keysLoaded equals max when source yields more items than max', async () => {
         let reported;
         // max=2, fetch returns 3 items [A, B, C]
-        cache = new DataCache(
+        const cache = newCache(
             () => [['A', 1], ['B', 2], ['C', 3]],
             {
                 max: 2,
@@ -29,7 +29,7 @@ describe('Finding 1: keysLoaded off-by-one when fetch exceeds max', () => {
 
     test('keysLoaded equals actual count when source yields fewer items than max', async () => {
         let reported;
-        cache = new DataCache(
+        const cache = newCache(
             () => [['A', 1]],
             {
                 max: 10,
@@ -46,14 +46,11 @@ describe('Finding 1: keysLoaded off-by-one when fetch exceeds max', () => {
 
 // ─── Finding 2: _coalescedFetches not recorded in getOrFetchMany fallback ─────
 describe('Finding 2: _coalescedFetches in getOrFetchMany fallback path', () => {
-    let cache;
-    afterEach(async () => { if (cache) await cache.close(); });
-
     test('coalescedFetches is incremented when two concurrent getOrFetchMany calls coalesce (no fetchByKeys)', async () => {
         let resolveKey;
         const pendingFetch = new Promise(r => { resolveKey = r; });
 
-        cache = new DataCache(
+        const cache = newCache(
             async () => [],
             {
                 max: 100,
@@ -79,11 +76,8 @@ describe('Finding 2: _coalescedFetches in getOrFetchMany fallback path', () => {
 
 // ─── Finding 3: keys.includes(k) dead O(n²) predicate ────────────────────────
 describe('Finding 3: keys.includes(k) always-true dead predicate removed', () => {
-    let cache;
-    afterEach(async () => { if (cache) await cache.close(); });
-
     test('getOrFetchMany returns all fetched values (predicate removal does not break results)', async () => {
-        cache = new DataCache(
+        const cache = newCache(
             async () => [],
             {
                 max: 100,
@@ -101,8 +95,6 @@ describe('Finding 3: keys.includes(k) always-true dead predicate removed', () =>
 // Behavioral regression guard: both loop paths must call onError and increment
 // _failureCount on refresh failure. Uses fake timers to drive the _timeoutLoop.
 describe('Finding 4: backoff error handling increments _failureCount and calls onError', () => {
-    const flushPromises = () => new Promise(resolve => jest.requireActual('timers').setImmediate(resolve));
-
     afterEach(() => { jest.useRealTimers(); });
 
     test('_timeoutLoop: onError called and _failureCount increments on refresh failure', async () => {
@@ -110,7 +102,7 @@ describe('Finding 4: backoff error handling increments _failureCount and calls o
         let errorCalled = false;
         let fail = false;
 
-        const cache = new DataCache(
+        const cache = newCache(
             () => { if (fail) throw new Error('fetch-error'); return []; },
             { max: 100, refreshAge: 5, onError: () => { errorCalled = true; } }
         );
@@ -122,18 +114,13 @@ describe('Finding 4: backoff error handling increments _failureCount and calls o
 
         expect(errorCalled).toBe(true);
         expect(cache._failureCount).toBeGreaterThanOrEqual(1);
-
-        await cache.close();
     });
 });
 
 // ─── Finding 5: checkValidity invalidation block duplicated ──────────────────
 describe('Finding 5: checkValidity invalidation increments _misses in all call sites', () => {
-    let cache;
-    afterEach(async () => { if (cache) await cache.close(); });
-
     function makeInvalidCache() {
-        return new DataCache(
+        return newCache(
             async () => [['k', 'stale']],
             {
                 max: 100,
@@ -144,7 +131,7 @@ describe('Finding 5: checkValidity invalidation increments _misses in all call s
     }
 
     test('get() increments _misses and _invalidations on invalid item', async () => {
-        cache = makeInvalidCache();
+        const cache = makeInvalidCache();
         await cache.init();
         cache.set('k', 'stale');
 
@@ -154,7 +141,7 @@ describe('Finding 5: checkValidity invalidation increments _misses in all call s
     });
 
     test('getOrFetch() increments _misses and _invalidations on invalid item', async () => {
-        cache = new DataCache(
+        const cache = newCache(
             async () => [],
             {
                 max: 100,
@@ -172,7 +159,7 @@ describe('Finding 5: checkValidity invalidation increments _misses in all call s
     });
 
     test('getOrFetchMany() increments _misses and _invalidations on invalid item', async () => {
-        cache = new DataCache(
+        const cache = newCache(
             async () => [],
             {
                 max: 100,
@@ -190,7 +177,7 @@ describe('Finding 5: checkValidity invalidation increments _misses in all call s
     });
 
     test('has() increments _invalidations on invalid item', async () => {
-        cache = makeInvalidCache();
+        const cache = makeInvalidCache();
         await cache.init();
         cache.set('k', 'stale');
 
@@ -200,7 +187,7 @@ describe('Finding 5: checkValidity invalidation increments _misses in all call s
     });
 
     test('has() also increments _misses on invalid item (parity with get/getOrFetch)', async () => {
-        cache = makeInvalidCache();
+        const cache = makeInvalidCache();
         await cache.init();
         cache.set('k', 'stale');
 
@@ -211,12 +198,9 @@ describe('Finding 5: checkValidity invalidation increments _misses in all call s
 
 // ─── Finding 6: if (firstItdata.done != true) dead code ──────────────────────
 describe('Finding 6: dead guard if (firstItdata.done != true) removed', () => {
-    let cache;
-    afterEach(async () => { if (cache) await cache.close(); });
-
     test('iterator loop still runs and loads all items after guard removal', async () => {
         let reported;
-        cache = new DataCache(
+        const cache = newCache(
             () => [['A', 1], ['B', 2], ['C', 3]],
             {
                 max: 10,

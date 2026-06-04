@@ -110,7 +110,7 @@ npx jest test/miss-cache-workload.test.js
 
 ## 5. Benchmark Results (10,000,000 Total DB Rows)
 
-✅ **FRESH — Re-run on 2026-06-03.** All numbers below are from the **process-isolated harness** (`benchmark/lib/isolated-runner.js`). Each `(round, strategy)` runs in its own forked process with a fresh pool and heap, `--expose-gc` quiesced memory, `hrtime` timing, and exact `DB Queries` counts. Round-to-round variation and negative deltas have been eliminated by process isolation.
+✅ **FRESH — Re-run on 2026-06-04.** All numbers below are from the **process-isolated harness** (`benchmark/lib/isolated-runner.js`). Each `(round, strategy)` runs in its own forked process with a fresh pool and heap, `--expose-gc` quiesced memory, `hrtime` timing, and exact `DB Queries` counts. Round-to-round variation and negative deltas have been eliminated by process isolation.
 
 ### A. Standard Scenario Throughput (50,000 Lookups, 5-Rounds Run)
 Simulates 50,000 read queries with a realistic traffic distribution of 70% cache hits, 25% cache misses (exist in DB), and 5% hard misses.
@@ -197,21 +197,21 @@ Compares `New Caching Logic` (Request Coalescing (single-flight), Batch Loading,
 
 | Strategy | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | DB Queries | Peak Heap | Base Heap | Heap Growth | Correctness |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **[R1] Direct Prepared** | 22,208 rps | 4.72 ms | 16.17 ms | 117.10 ms | 51,050 | 35.44 MB | 6.20 MB | +29.24 MB | ✅ PASSED |
-| **[R1] Old Caching Logic** | 9,475 rps | 23.98 ms | 228.40 ms | 245.14 ms | 93,272 | 51.89 MB | 6.20 MB | +45.69 MB | ✅ PASSED |
-| **[R1] New Caching Logic** | **23,646 rps** | **12.66 ms** | **22.88 ms** | **37.76 ms** | **27,903** | **64.72 MB** | 6.20 MB | **+58.52 MB** | ✅ PASSED |
-| **[R2] Direct Prepared** | 17,573 rps | 4.38 ms | 51.50 ms | 207.79 ms | 79,750 | 33.02 MB | 6.18 MB | +26.84 MB | ✅ PASSED |
-| **[R2] Old Caching Logic** | 8,262 rps | 21.33 ms | 220.29 ms | 238.86 ms | 129,222 | 54.47 MB | 6.18 MB | +48.29 MB | ✅ PASSED |
-| **[R2] New Caching Logic** | **24,611 rps** | **11.25 ms** | **18.94 ms** | **32.33 ms** | **53,127** | **63.94 MB** | 6.18 MB | **+57.76 MB** | ✅ PASSED |
-| **[R3] Direct Prepared** | 19,586 rps | 4.02 ms | 23.61 ms | 207.29 ms | 88,700 | 33.05 MB | 6.18 MB | +26.87 MB | ✅ PASSED |
-| **[R3] Old Caching Logic** | 10,026 rps | 19.21 ms | 217.48 ms | 235.81 ms | 144,988 | 54.82 MB | 6.18 MB | +48.64 MB | ✅ PASSED |
-| **[R3] New Caching Logic** | **21,491 rps** | **11.25 ms** | **20.91 ms** | **50.52 ms** | **47,408** | **61.84 MB** | 6.18 MB | **+55.66 MB** | ✅ PASSED |
-| **[R4] Direct Prepared** | 18,572 rps | 4.31 ms | 28.59 ms | 207.34 ms | 83,750 | 33.01 MB | 6.18 MB | +26.83 MB | ✅ PASSED |
-| **[R4] Old Caching Logic** | 11,965 rps | 17.87 ms | 213.89 ms | 249.73 ms | 161,762 | 66.92 MB | 6.18 MB | +60.74 MB | ✅ PASSED |
-| **[R4] New Caching Logic** | **22,967 rps** | **11.19 ms** | **22.76 ms** | **66.59 ms** | **50,108** | **61.63 MB** | 6.18 MB | **+55.45 MB** | ✅ PASSED |
-| **[R5] Direct Prepared** | 19,593 rps | 4.16 ms | 23.23 ms | 206.11 ms | 87,650 | 31.42 MB | 6.18 MB | +25.24 MB | ✅ PASSED |
-| **[R5] Old Caching Logic** | 9,396 rps | 20.57 ms | 223.20 ms | 248.88 ms | 138,526 | 54.40 MB | 6.18 MB | +48.22 MB | ✅ PASSED |
-| **[R5] New Caching Logic** | **20,766 rps** | **11.36 ms** | **20.62 ms** | **35.42 ms** | **45,699** | **62.90 MB** | 6.18 MB | **+56.72 MB** | ✅ PASSED |
+| **[R1] Direct Prepared** | 21,068 rps | 5.80 ms | 13.89 ms | 204.54 ms | 94,800 | 33.23 MB | 6.21 MB | +27.02 MB | ✅ PASSED |
+| **[R1] Old Caching Logic** | 7,969 rps | 22.07 ms | 225.92 ms | 238.55 ms | 127,712 | 54.59 MB | 6.21 MB | +48.38 MB | ✅ PASSED |
+| **[R1] New Caching Logic** | **24,860 rps** | **11.83 ms** | **19.42 ms** | **25.19 ms** | **53,230** | **63.31 MB** | 6.21 MB | **+57.10 MB** | ✅ PASSED |
+| **[R2] Direct Prepared** | 18,463 rps | 6.62 ms | 19.20 ms | 211.89 ms | 83,300 | 33.31 MB | 6.21 MB | +27.10 MB | ✅ PASSED |
+| **[R2] Old Caching Logic** | 8,840 rps | 19.74 ms | 223.74 ms | 242.20 ms | 135,581 | 55.18 MB | 6.21 MB | +48.97 MB | ✅ PASSED |
+| **[R2] New Caching Logic** | **25,195 rps** | **11.73 ms** | **19.74 ms** | **26.69 ms** | **54,527** | **62.73 MB** | 6.21 MB | **+56.52 MB** | ✅ PASSED |
+| **[R3] Direct Prepared** | 16,884 rps | 6.81 ms | 19.19 ms | 212.45 ms | 76,250 | 31.23 MB | 6.21 MB | +25.02 MB | ✅ PASSED |
+| **[R3] Old Caching Logic** | 7,842 rps | 19.95 ms | 223.89 ms | 238.56 ms | 126,527 | 54.50 MB | 6.21 MB | +48.29 MB | ✅ PASSED |
+| **[R3] New Caching Logic** | **24,403 rps** | **11.79 ms** | **19.40 ms** | **26.00 ms** | **52,728** | **62.54 MB** | 6.21 MB | **+56.33 MB** | ✅ PASSED |
+| **[R4] Direct Prepared** | 19,908 rps | 5.84 ms | 16.30 ms | 206.30 ms | 89,950 | 33.04 MB | 6.21 MB | +26.83 MB | ✅ PASSED |
+| **[R4] Old Caching Logic** | 8,754 rps | 20.71 ms | 225.43 ms | 242.06 ms | 134,137 | 54.73 MB | 6.21 MB | +48.52 MB | ✅ PASSED |
+| **[R4] New Caching Logic** | **25,309 rps** | **11.40 ms** | **19.68 ms** | **29.54 ms** | **54,553** | **60.07 MB** | 6.21 MB | **+53.86 MB** | ✅ PASSED |
+| **[R5] Direct Prepared** | 21,822 rps | 5.07 ms | 13.80 ms | 198.93 ms | 98,100 | 29.98 MB | 6.21 MB | +23.77 MB | ✅ PASSED |
+| **[R5] Old Caching Logic** | 9,144 rps | 21.05 ms | 223.23 ms | 236.52 ms | 137,877 | 54.55 MB | 6.21 MB | +48.34 MB | ✅ PASSED |
+| **[R5] New Caching Logic** | **25,427 rps** | **11.56 ms** | **19.56 ms** | **27.33 ms** | **54,376** | **60.85 MB** | 6.21 MB | **+54.64 MB** | ✅ PASSED |
 
 ### Critical ROI Insights:
 1. **Request Coalescing prevents Thundering Herd**: The p99 tail latency drops from **~240 ms** (old logic) to **~24–67 ms** (new logic), keeping application latencies flat under stress.
@@ -227,21 +227,21 @@ Models a cache-penetration **attack**: 50% of traffic hammers a fixed pool of **
 
 | Round | Strategy | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | DB Queries | Peak Heap | Base Heap | Heap Growth |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **R1** | Direct Prepared (No Cache) | 1,890 rps | 5.79 ms | 10.72 ms | 203.36 ms | 38,100 | 8.10 MB | 5.83 MB | +2.27 MB |
-| **R1** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,916 rps | 1.30 ms | 7.10 ms | 9.25 ms | 18,718 | 13.30 MB | 5.83 MB | +7.47 MB |
-| **R1** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 8`) | 2,010 rps | **0.08 ms** | **2.10 ms** | **4.01 ms** | **2,829** | 13.40 MB | 5.83 MB | +7.57 MB |
-| **R2** | Direct Prepared (No Cache) | 1,842 rps | 8.78 ms | 16.99 ms | 111.38 ms | 111,100 | 8.57 MB | 5.81 MB | +2.76 MB |
-| **R2** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,957 rps | 1.03 ms | 8.60 ms | 19.70 ms | 56,751 | 13.28 MB | 5.81 MB | +7.47 MB |
-| **R2** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,023 rps | **0.06 ms** | **0.14 ms** | **0.18 ms** | **3,062** | 13.35 MB | 5.81 MB | +7.54 MB |
-| **R3** | Direct Prepared (No Cache) | 1,836 rps | 9.69 ms | 104.00 ms | 211.98 ms | 110,550 | 8.21 MB | 5.81 MB | +2.40 MB |
-| **R3** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,964 rps | 1.43 ms | 8.23 ms | 10.36 ms | 57,366 | 13.17 MB | 5.81 MB | +7.36 MB |
-| **R3** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,026 rps | **0.07 ms** | **0.15 ms** | **0.19 ms** | **3,067** | 13.27 MB | 5.81 MB | +7.46 MB |
-| **R4** | Direct Prepared (No Cache) | 1,937 rps | 7.78 ms | 16.80 ms | 109.92 ms | 116,750 | 8.39 MB | 5.81 MB | +2.58 MB |
-| **R4** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,957 rps | 0.51 ms | 7.46 ms | 14.29 ms | 56,897 | 13.42 MB | 5.81 MB | +7.61 MB |
-| **R4** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,025 rps | **0.08 ms** | **0.15 ms** | **0.19 ms** | **3,066** | 13.27 MB | 5.81 MB | +7.46 MB |
-| **R5** | Direct Prepared (No Cache) | 1,865 rps | 7.92 ms | 17.34 ms | 105.11 ms | 112,450 | 8.43 MB | 5.81 MB | +2.62 MB |
-| **R5** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,948 rps | 2.47 ms | 8.63 ms | 11.40 ms | 56,309 | 13.21 MB | 5.81 MB | +7.40 MB |
-| **R5** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,027 rps | **0.08 ms** | **0.15 ms** | **0.21 ms** | **3,058** | 13.27 MB | 5.81 MB | +7.46 MB |
+| **R1** | Direct Prepared (No Cache) | 1,889 rps | 6.68 ms | 10.96 ms | 18.28 ms | 113,750 | 8.37 MB | 5.84 MB | +2.53 MB |
+| **R1** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,968 rps | 0.24 ms | 6.18 ms | 9.87 ms | 57,321 | 12.99 MB | 5.84 MB | +7.15 MB |
+| **R1** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,023 rps | **0.08 ms** | **0.18 ms** | **0.24 ms** | **3,053** | 13.37 MB | 5.84 MB | +7.53 MB |
+| **R2** | Direct Prepared (No Cache) | 1,843 rps | 10.18 ms | 108.22 ms | 208.35 ms | 111,150 | 8.64 MB | 5.84 MB | +2.80 MB |
+| **R2** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,930 rps | 0.30 ms | 7.51 ms | 9.33 ms | 55,961 | 13.45 MB | 5.84 MB | +7.61 MB |
+| **R2** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,027 rps | **0.09 ms** | **0.19 ms** | **0.24 ms** | **3,053** | 13.32 MB | 5.84 MB | +7.48 MB |
+| **R3** | Direct Prepared (No Cache) | 1,820 rps | 10.60 ms | 18.43 ms | 207.60 ms | 109,700 | 9.05 MB | 5.84 MB | +3.21 MB |
+| **R3** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,938 rps | 2.17 ms | 8.09 ms | 12.43 ms | 55,756 | 13.39 MB | 5.84 MB | +7.55 MB |
+| **R3** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,013 rps | **0.09 ms** | **0.18 ms** | **0.24 ms** | **3,058** | 13.39 MB | 5.84 MB | +7.55 MB |
+| **R4** | Direct Prepared (No Cache) | 1,835 rps | 10.04 ms | 108.78 ms | 208.46 ms | 110,500 | 8.52 MB | 5.84 MB | +2.68 MB |
+| **R4** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,954 rps | 0.28 ms | 8.21 ms | 10.39 ms | 56,166 | 13.46 MB | 5.84 MB | +7.62 MB |
+| **R4** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,013 rps | **0.08 ms** | **0.16 ms** | **0.20 ms** | **3,037** | 13.31 MB | 5.84 MB | +7.47 MB |
+| **R5** | Direct Prepared (No Cache) | 1,885 rps | 8.44 ms | 14.38 ms | 109.52 ms | 113,700 | 8.86 MB | 5.84 MB | +3.02 MB |
+| **R5** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,955 rps | 0.71 ms | 7.04 ms | 8.65 ms | 55,817 | 13.24 MB | 5.84 MB | +7.40 MB |
+| **R5** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,010 rps | **0.08 ms** | **0.16 ms** | **0.21 ms** | **3,064** | 13.41 MB | 5.84 MB | +7.57 MB |
 
 **Key Takeaway**: Over 60 seconds with `maxAgeMiss: 20`, miss-cache exhibits the **full lifecycle**: misses are cached, entries expire after 20s, and are refetched — total ~3,060–3,070 DB queries per round (~1,000 per 20s window), versus ~56–57k for `maxMiss: 0` (disabled) and ~110–116k for no cache. This **~95% reduction** proves the production claim: under indefinite attack, miss-cache **bounds** DB load to ~pool-size per TTL interval, not "zero forever" (which was an artifact of earlier 30s runs expiring nothing). p99 latency stays **~0.2 ms** (pure in-process), ~10–20 ms worse with `maxMiss: 0`, and ~110–210 ms worse uncached. Miss-cache costs ~7.5 MB bounded extra heap.
 

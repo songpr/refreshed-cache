@@ -1,6 +1,6 @@
 const { expect, test } = require("@jest/globals");
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const DataCache = require("../index");
+const { delay } = require("./helpers");
 
 test("hits and misses metrics are tracked correctly", async () => {
     const fetch = () => [['a', 1], ['b', 2]];

@@ -9,6 +9,7 @@ declare class DataCache<K, V> {
   refreshAge: number;
   resetOnRefresh: boolean;
   max: number;
+  latencySampleRate: number;
   refreshAt?: { readonly daysMs: number; readonly msFrom00_00: number };
   maxMiss?: number;
   maxAgeMiss?: number;
@@ -21,6 +22,28 @@ declare class DataCache<K, V> {
     coalescedFetches: number;
     mismatches: number;
     invalidations: number;
+    hitLatency: {
+      avgMs: number;
+    };
+    missFetchLatency: {
+      minMs: number;
+      avgMs: number;
+      maxMs: number;
+    };
+    batchFetchLatency: {
+      minMs: number;
+      avgMs: number;
+      maxMs: number;
+    };
+    refreshLatency: {
+      minMs: number;
+      avgMs: number;
+      maxMs: number;
+    };
+    timeSavedMs: number;
+    hitSpeedup: number;
+    batchPerKeyMs: number;
+    batchEfficiency: number;
   };
 
   init(): Promise<void>;
@@ -34,6 +57,14 @@ declare class DataCache<K, V> {
   getOrFetchMany(keys: K[]): Promise<Record<any, V>>;
   has(key: K): boolean;
   close(): Promise<void>;
+  gain(): {
+    timeSavedMs: number;
+    speedupFactor: number;
+    activeSize: number;
+    hitSizeRatio: number;
+    utilization: number;
+    recommendation: string;
+  };
 }
 
 declare namespace DataCache {
@@ -54,6 +85,7 @@ declare namespace DataCache {
     isEqual?: (a: V, b: V) => boolean;
     backoffInitialDelay?: number;
     backoffMaxDelay?: number;
+    latencySampleRate?: number;
   }
 }
 
