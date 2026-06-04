@@ -111,3 +111,64 @@ A common question when inspecting the codebase is why the main class is named `D
   const RefreshedCache = require("refreshed-cache");
   ```
 * **Preserving Compatibility:** Renaming `DataCache` to `RefreshedCache` inside the source files and TypeScript typings was decided against to preserve backward compatibility. Doing so would break existing applications that import the type definitions directly (`import { DataCache } ...`) or perform runtime checks (`instanceof DataCache`).
+
+---
+
+## 5. ROI Analysis: Real-Time Latency Percentiles (p50/p95/p99) inside Core Cache Metrics
+
+### Proposal: Exposing `metrics.p50`, `metrics.p95`, and `metrics.p99`
+*   **What**: Directly track the latency of read operations (`get`, `getOrFetch`, `getOrFetchMany`) inside the core cache class and expose real-time percentiles.
+*   **Cost**: Low/Medium implementation complexity (~100 LOC), but **Extremely High** performance and latency overhead.
+
+---
+
+### Detailed ROI & Performance Overhead Analysis
+
+#### 1. Hot Path Latency Impact (Microsecond Budget)
+*   **The Baseline**: A standard in-memory cache hit (Map lookup + LRU update) is extremely fast, taking **~50ns – 150ns** on modern hardware.
+*   **The Timing Cost**: Invoking `process.hrtime.bigint()` (or `performance.now()`) requires wrapping system/hardware clock calls. A single call to `process.hrtime.bigint()` takes **~50ns – 120ns** depending on the CPU and OS virtualization layer.
+*   **The Math**: Because timing requires two calls (one before and one after the operation), the timing overhead alone adds **~100ns – 240ns** per read.
+*   **Latency Penalty**: This adds a **100% to 240% latency penalty** to cache hits, making them 2x to 3.4x slower. For cache hits (the dominant path in heavy workloads), this is a critical regression.
+*   **Cache Miss Scenario**: For cache misses, backend API/DB latency is typically `>1ms` (`1,000,000ns`). The timing overhead is `<0.02%` of the total miss duration, which is negligible. However, since the cache's goal is to maximize hit performance, degrading hits for the sake of measuring them is a poor trade-off.
+
+#### 2. Memory Footprint & Garbage Collection (GC) Pressure
+*   **Unbounded Storage (Anti-Pattern)**: Storing latency numbers in an array for every request will eventually consume all available heap space, causing Out Of Memory (OOM) crashes.
+*   **Circular Buffer/Sliding Window**: To prevent memory leaks, we must limit the sample size (e.g., a rolling window of the last 10,000 requests).
+*   **GC Overhead**: Appending, slicing, and shifting elements in JavaScript arrays generates transient garbage objects. Under a throughput of 20,000 RPS, Node.js will trigger frequent garbage collection cycles, causing application-wide latency spikes (stuttering).
+*   **Pre-allocated TypedArrays**: Using a pre-allocated typed array (e.g., `Float64Array`) prevents object allocation, but still requires managing write pointers and sorting.
+
+#### 3. CPU Cost (Event Loop Blocking)
+*   **Sorting Complexity**: Percentile calculations require sorting the dataset ($O(N \log N)$ complexity). Sorting a rolling window of 10,000 elements in JavaScript blocks the single-threaded event loop for **~0.2ms – 0.5ms**.
+*   **Throughput Impact**: If percentiles are calculated on the hot path or polled frequently, it stalls the event loop, decreasing the maximum QPS throughput of the hosting application.
+
+---
+
+### Strategic Recommendation: **DO NOT IMPLEMENT IN CORE**
+
+Exposing real-time latency percentiles directly inside the core library is **not recommended**. It directly contradicts the primary purpose of `refreshed-cache`: providing ultra-low-latency in-memory reads.
+
+#### The Correct Architectural Pattern: **APM / Wrapper Layer**
+Latency percentiles belong in the **Application/APM layer** (using OpenTelemetry, Prometheus, Datadog, or custom middleware wrappers). APM libraries are highly optimized for this, using native bindings or lock-free metric aggregators (like HDR Histograms) that run out-of-process or asynchronously.
+
+```javascript
+// Recommended APM instrumentation pattern (Opt-in by application developers)
+const cache = new DataCache(fetchFn);
+
+async function measuredGet(key) {
+  const start = process.hrtime.bigint();
+  try {
+    return await cache.getOrFetch(key);
+  } finally {
+    const durationNs = process.hrtime.bigint() - start;
+    apm.recordHistogram('cache.read.latency', Number(durationNs) / 1e6);
+  }
+}
+```
+
+#### Fallback Alternative: Sampled Circular Buffer (Opt-in Only)
+If native latency tracking is ever implemented, it must be strictly opt-in and heavily optimized:
+1. **Disabled by Default**: Must be explicitly enabled via options (e.g., `{ collectLatencyMetrics: true }`).
+2. **Sampling Rate**: Support sampling (e.g., `sampleRate: 0.01` to only measure 1% of operations) to minimize hot-path clock calls.
+3. **Fixed Memory Window**: Store samples in a pre-allocated cyclic `Float32Array` of limited size (e.g., 1,000 slots) to guarantee zero GC allocation overhead.
+4. **Lazy Percentiles**: Only calculate percentiles when the getter is queried, avoiding constant sorting overhead.
+
