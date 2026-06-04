@@ -1,10 +1,12 @@
 const DataCache = require('../index.js');
+const { trackCaches } = require('./helpers');
+const newCache = trackCaches();
 
 describe('Roadmap Features & Branch Coverage Verification', () => {
 
     test('Promise Coalescing (Single-flight) - should only call fetchByKey once for concurrent requests on the same key', async () => {
         let callCount = 0;
-        const cache = new DataCache(
+        const cache = newCache(
             async () => [],
             {
                 max: 100,
@@ -41,7 +43,7 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
         let batchCallCount = 0;
         const batchKeysRequested = [];
 
-        const cache = new DataCache(
+        const cache = newCache(
             async () => [],
             {
                 max: 100,
@@ -70,7 +72,7 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
     });
 
     test('getOrFetchMany validation - should throw error if keys is not an array', async () => {
-        const cache = new DataCache(async () => []);
+        const cache = newCache(async () => []);
         await cache.init();
         try {
             await expect(cache.getOrFetchMany('not-an-array')).rejects.toThrow("keys must be an array");
@@ -81,7 +83,7 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
 
     test('getOrFetchMany fallback - should use individual getOrFetch if fetchByKeys is not defined', async () => {
         let fetchByKeyCalls = 0;
-        const cache = new DataCache(
+        const cache = newCache(
             async () => [],
             {
                 max: 100,
@@ -107,16 +109,16 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
 
     test('fetchByKeys constructor options validation - should throw on invalid maxMiss or maxAgeMiss', () => {
         expect(() => {
-            new DataCache(async () => [], { fetchByKeys: () => {}, maxMiss: 'invalid' });
+            newCache(async () => [], { fetchByKeys: () => {}, maxMiss: 'invalid' });
         }).toThrow("Invalid maxMiss");
 
         expect(() => {
-            new DataCache(async () => [], { fetchByKeys: () => {}, maxAgeMiss: 'invalid' });
+            newCache(async () => [], { fetchByKeys: () => {}, maxAgeMiss: 'invalid' });
         }).toThrow("Invalid maxAgeMiss");
     });
 
     test('getOrFetchMany - handle misses and empty returned values', async () => {
-        const cache = new DataCache(
+        const cache = newCache(
             async () => [],
             {
                 max: 100,
@@ -140,7 +142,7 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
     });
 
     test('getOrFetchMany - retrieve already cached items and handle undefined elements in fetchByKeys output', async () => {
-        const cache = new DataCache(
+        const cache = newCache(
             async () => [['a', 1]],
             {
                 max: 100,
@@ -165,7 +167,7 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
     test('Timer callback close checks (lines 77, 82, 119)', async () => {
         // Test line 82: close cache during asyncRefresh in _timeoutLoop
         let runCount = 0;
-        const cache1 = new DataCache(
+        const cache1 = newCache(
             async () => {
                 runCount++;
                 if (runCount === 2) {
@@ -180,7 +182,7 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
         await new Promise(r => setTimeout(r, 1100));
 
         // Test line 77: _timeoutLoop fires after close
-        const cache2 = new DataCache(async () => [], { refreshAge: 1 });
+        const cache2 = newCache(async () => [], { refreshAge: 1 });
         await cache2.init();
         await cache2.close();
         // Trigger loop manually which hits line 77 since isClose is true
@@ -193,42 +195,42 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
 
     test('Constructor validations and other edge cases for 100% coverage', async () => {
         // Invalid fetch
-        expect(() => new DataCache('not-a-fn')).toThrow("fetch must be function/async function");
+        expect(() => newCache('not-a-fn')).toThrow("fetch must be function/async function");
 
         // Invalid maxAge
-        expect(() => new DataCache(async () => [], { maxAge: 'invalid' })).toThrow("Invalid maxAge");
+        expect(() => newCache(async () => [], { maxAge: 'invalid' })).toThrow("Invalid maxAge");
 
         // Invalid refreshAge
-        expect(() => new DataCache(async () => [], { refreshAge: 'invalid' })).toThrow("Invalid refreshAge");
+        expect(() => newCache(async () => [], { refreshAge: 'invalid' })).toThrow("Invalid refreshAge");
 
         // Invalid resetOnRefresh
-        expect(() => new DataCache(async () => [], { resetOnRefresh: 'invalid' })).toThrow("Invalid resetOnRefresh");
+        expect(() => newCache(async () => [], { resetOnRefresh: 'invalid' })).toThrow("Invalid resetOnRefresh");
 
         // Invalid passRecentKeysOnRefresh
-        expect(() => new DataCache(async () => [], { passRecentKeysOnRefresh: 'invalid' })).toThrow("Invalid passRecentKeysOnRefresh");
+        expect(() => newCache(async () => [], { passRecentKeysOnRefresh: 'invalid' })).toThrow("Invalid passRecentKeysOnRefresh");
 
         // Invalid max
-        expect(() => new DataCache(async () => [], { max: 'invalid' })).toThrow("Invalid max");
+        expect(() => newCache(async () => [], { max: 'invalid' })).toThrow("Invalid max");
 
         // Invalid fetchByKey option validations
-        expect(() => new DataCache(async () => [], { fetchByKey: () => {}, maxMiss: 'invalid' })).toThrow("Invalid maxMiss");
-        expect(() => new DataCache(async () => [], { fetchByKey: () => {}, maxAgeMiss: 'invalid' })).toThrow("Invalid maxAgeMiss");
+        expect(() => newCache(async () => [], { fetchByKey: () => {}, maxMiss: 'invalid' })).toThrow("Invalid maxMiss");
+        expect(() => newCache(async () => [], { fetchByKey: () => {}, maxAgeMiss: 'invalid' })).toThrow("Invalid maxAgeMiss");
 
         // Invalid refreshAt days
-        expect(() => new DataCache(async () => [], { refreshAt: { days: 0, at: '10:00:00' } })).toThrow("Invalid refreshAt.days");
-        expect(() => new DataCache(async () => [], { refreshAt: { days: 15, at: '10:00:00' } })).toThrow("Invalid refreshAt.days");
+        expect(() => newCache(async () => [], { refreshAt: { days: 0, at: '10:00:00' } })).toThrow("Invalid refreshAt.days");
+        expect(() => newCache(async () => [], { refreshAt: { days: 15, at: '10:00:00' } })).toThrow("Invalid refreshAt.days");
 
         // Invalid refreshAt format
-        expect(() => new DataCache(async () => [], { refreshAt: { days: 1, at: 'invalid' } })).toThrow("Invalid refreshAt.at");
-        expect(() => new DataCache(async () => [], { refreshAt: { days: 1, at: 123 } })).toThrow("Invalid refreshAt.at");
+        expect(() => newCache(async () => [], { refreshAt: { days: 1, at: 'invalid' } })).toThrow("Invalid refreshAt.at");
+        expect(() => newCache(async () => [], { refreshAt: { days: 1, at: 123 } })).toThrow("Invalid refreshAt.at");
 
         // Fetch returning non-iterable inside init()
-        const cacheNonIterable = new DataCache(async () => ({}));
+        const cacheNonIterable = newCache(async () => ({}));
         await expect(cacheNonIterable.init()).rejects.toThrow("fetch return non iterable data");
 
         // Fetch returning non-iterable inside asyncRefresh
         let callCount = 0;
-        const cacheNonIterableRefresh = new DataCache(
+        const cacheNonIterableRefresh = newCache(
             async () => {
                 callCount++;
                 if (callCount === 2) return {};
@@ -242,13 +244,13 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
         await cacheNonIterableRefresh.close();
 
         // max <= 0 refresh check
-        const cacheMaxZero = new DataCache(async () => [['k', 1]], { max: 0 });
+        const cacheMaxZero = newCache(async () => [['k', 1]], { max: 0 });
         await cacheMaxZero.init();
         await cacheMaxZero.asyncRefresh();
         await cacheMaxZero.close();
 
         // empty iterator/array inside init() & asyncRefresh
-        const cacheEmptyIt = new DataCache(async () => []);
+        const cacheEmptyIt = newCache(async () => []);
         await cacheEmptyIt.init();
         await cacheEmptyIt.asyncRefresh();
         await cacheEmptyIt.close();
@@ -257,7 +259,7 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
     test('Synchronous fetch, fetchByKey, fetchByKeys, has, delete/clear without missCache, getOrFetchMany edge cases', async () => {
         // 1. Sync fetch & Sync fetchByKey & Sync fetchByKeys
         let syncFetchCount = 0;
-        const cache = new DataCache(
+        const cache = newCache(
             () => {
                 syncFetchCount++;
                 return [['a', 1]];
@@ -270,7 +272,7 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
         );
 
         // test getOrFetch without key and with non-existent fetchByKey (when fetchByKey is undefined)
-        const simpleCache = new DataCache(() => []);
+        const simpleCache = newCache(() => []);
         await simpleCache.init();
         expect(await simpleCache.getOrFetch('random')).toBeUndefined();
         await simpleCache.close();
@@ -292,7 +294,7 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
         expect(resMissCached).toEqual({});
 
         // test getOrFetchMany returning keys not in original request
-        const cacheWithUnrequestedKeys = new DataCache(
+        const cacheWithUnrequestedKeys = newCache(
             async () => [],
             {
                 max: 10,
@@ -313,7 +315,7 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
         expect(resSyncSingle).toBe('sync-d');
 
         // test delete & clear without miss cache
-        const cacheNoMiss = new DataCache(() => []);
+        const cacheNoMiss = newCache(() => []);
         await cacheNoMiss.init();
         cacheNoMiss.set('x', 1);
         expect(cacheNoMiss.get('x')).toBe(1);
@@ -329,32 +331,32 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
 
     test('Additional timer branches and close configurations', async () => {
         // Test close when no timeoutId exists
-        const cacheNoTimer = new DataCache(() => [], { refreshAge: 100 });
+        const cacheNoTimer = newCache(() => [], { refreshAge: 100 });
         // Manually delete _timeoutId or bypass init
         await cacheNoTimer.close();
         await cacheNoTimer.close(); // Test line 405 (already closed branch)
 
         // Test refreshAtLoop with refreshDaysInMs !== 0
-        const cacheRefreshAt = new DataCache(() => []);
+        const cacheRefreshAt = newCache(() => []);
         const now = new Date();
         const nowMs = now.getHours() * 3600000 + now.getMinutes() * 60000 + now.getSeconds() * 1000 + now.getMilliseconds();
         cacheRefreshAt._refreshAtLoop(cacheRefreshAt.asyncRefresh, { msFrom00_00: nowMs + 10, daysMs: 50 }, 50);
         await cacheRefreshAt.close();
 
         // Test refreshAtLoop with refreshDaysInMs === 0 and diffTime <= 0
-        const cacheRefreshAtZeroPassed = new DataCache(() => []);
+        const cacheRefreshAtZeroPassed = newCache(() => []);
         const passedTimeMs = nowMs - 10000; // 10 seconds ago
         cacheRefreshAtZeroPassed._refreshAtLoop(cacheRefreshAtZeroPassed.asyncRefresh, { msFrom00_00: passedTimeMs, daysMs: 100000 });
         await cacheRefreshAtZeroPassed.close();
 
         // Test refreshAtLoop with refreshDaysInMs === 0 and diffTime > 0
-        const cacheRefreshAtZeroFuture = new DataCache(() => []);
+        const cacheRefreshAtZeroFuture = newCache(() => []);
         const futureTimeMs = nowMs + 10000; // 10 seconds in future
         cacheRefreshAtZeroFuture._refreshAtLoop(cacheRefreshAtZeroFuture.asyncRefresh, { msFrom00_00: futureTimeMs, daysMs: 100000 });
         await cacheRefreshAtZeroFuture.close();
 
         // Test line 119: _refreshAtLoop fires after close
-        const cache3 = new DataCache(async () => []);
+        const cache3 = newCache(async () => []);
         await cache3.init();
         await cache3.close();
         const cache3Now = new Date();
@@ -370,7 +372,7 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
             const fetchFn = isAsync 
                 ? async (keys) => { fetchedKeys = keys; return [['k', 1]]; }
                 : (keys) => { fetchedKeys = keys; return [['k', 1]]; };
-            const cache = new DataCache(fetchFn, { refreshAge: 1, passRecentKeysOnRefresh: passRecent });
+            const cache = newCache(fetchFn, { refreshAge: 1, passRecentKeysOnRefresh: passRecent });
             await cache.init();
             await cache.asyncRefresh();
             expect(fetchedKeys).toEqual(passRecent ? ['k'] : undefined);
@@ -399,7 +401,7 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
             }
         };
 
-        const cache = new DataCache(() => customIterator);
+        const cache = newCache(() => customIterator);
         // We will call asyncRefresh manually to trigger the target lines
         await cache.init();
         await cache.asyncRefresh();
@@ -408,7 +410,7 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
 
     test('getOrFetchMany fallback when single getOrFetch resolves to undefined', async () => {
         // fetchByKey returns undefined, fetchByKeys is undefined
-        const cache = new DataCache(async () => [], { fetchByKey: async (k) => undefined });
+        const cache = newCache(async () => [], { fetchByKey: async (k) => undefined });
         await cache.init();
         const results = await cache.getOrFetchMany(['missing1', 'missing2']);
         expect(results).toEqual({});
@@ -416,7 +418,7 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
     });
 
     test('getOrFetchMany with fetchByKeys returning undefined (falsy fetchedData, line 359)', async () => {
-        const cache = new DataCache(async () => [], {
+        const cache = newCache(async () => [], {
             fetchByKeys: (keys) => undefined
         });
         await cache.init();
@@ -426,14 +428,14 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
     });
 
     test('asyncRefresh with zero max (line 192)', async () => {
-        const cache = new DataCache(async () => [], { max: 0 });
+        const cache = newCache(async () => [], { max: 0 });
         await cache.init();
         await cache.asyncRefresh();
         await cache.close();
     });
 
     test('Access all public and private getters for 100% function/statement coverage', async () => {
-        const cache = new DataCache(async () => [], {
+        const cache = newCache(async () => [], {
             maxAge: 300,
             refreshAge: 150,
             resetOnRefresh: false,
@@ -467,7 +469,7 @@ describe('Roadmap Features & Branch Coverage Verification', () => {
 
     test('unexpected error in catch block of timeoutLoop', async () => {
         const fn = () => Object.entries({ a: 1 });
-        const cache = new DataCache(fn, { refreshAge: 10 });
+        const cache = newCache(fn, { refreshAge: 10 });
         await cache.init();
         
         const originalConsoleError = console.error;

@@ -18,7 +18,14 @@ This document reflects the **actual implemented state** of `refreshed-cache` (`i
 | `set` / `get` / `delete` / `clear` / `has` / `entries` | ✅ Shipped | — |
 | Test suite (~150 tests across 18 files) | ✅ Shipped | `test/` |
 
-> ✅ **Publish gate cleared:** 1.8.0 is published to npm — the coalescing, batch, observability, and backoff features are now live, not just in-repo. The §3 "does a published, honestly-documented 1.8.0 attract real users?" gate is therefore open, so Tier 2.5 work below is now actionable rather than speculative.
+> ⚠️ **Publish state (verified against the npm tarball, 2026-06-04):** the **published `1.8.0`** contains the core refresh surface, miss-cache (`maxMiss`/`maxAgeMiss`), `getOrFetch`/`getOrFetchMany`, and single-flight coalescing (`_pendingFetches`) — but **NOT** `metrics`, `gain()`, `onRefresh`/`onError`, backoff, `checkValidity`/`isEqual`, or `latencySampleRate`. Its `index.d.ts` is the 1.4K pre-observability surface. The entire **observability + `gain()` layer in the local working tree is unpublished.**
+>
+> Two consequences: (1) the deprecated `hitSpeedup`/`speedupFactor` aliases **never reached a user**, so they can be removed cleanly rather than carried for back-compat; (2) npm `1.8.0` is immutable and already holds *different bytes*, so the local tree **cannot republish as 1.8.0** — the next publish must bump the version. See "Versioning plan" below.
+
+### Versioning plan
+
+- **`1.9.0` (next release):** publish the unreleased observability + backoff + `gain()` work. It is purely additive over the published 1.8.0, so it's a **minor**. Remove the never-shipped `hitSpeedup`/`speedupFactor` aliases pre-publish and ship `hitVsFetchLatencyRatio` with a clean surface. The Tier 2.8 advisory `gain()` can land in this same release, since no part of `gain()` has shipped yet.
+- **`2.0.0` (reserve for real breakage — do not manufacture):** the alias removal is a non-event (never published), so 2.0 needs a genuine breaking change to justify it. Candidates to hold for a deliberate major: **`getOrFetchMany` returning a `Map`** instead of `Record<any,V>` (the object form coerces numeric/object keys to strings — a real correctness limitation), raising the **minimum Node version / ESM-first** packaging, or changing a surprising **default** (`resetOnRefresh`, `maxMiss`). Let a real breaking need trigger it, not a positioning milestone — "the cache now advises" is a 1.9.0 *release-notes story*, not a major bump.
 
 ---
 
@@ -259,27 +266,27 @@ Add `sleep(10)` to all DB paths. The expected outcome — "ORM loop 200k queries
 **Two structural gaps to close:**
 
 1. **No hit *rate*.** Recommendations key off `hitSizeRatio = hits / activeSize` — a **lifetime counter ÷ instantaneous size**, so it grows unbounded with uptime and its thresholds (`0.5`, `2`) mean different things at minute 1 vs. hour 5. Add `hitRate = hits / (hits + misses)` to `metrics` (both counters already exist) — normalized, uptime-independent, and the single most diagnostic "is this strategy working at all" number.
-2. **No waste/churn signal.** To separate "too small (thrash)" from "refreshing keys nobody reads," add a **capacity-eviction counter** via lru-cache's `dispose` callback (the only genuinely new instrumentation), and fold the `keysLoaded` vs `keysUpdated` already emitted by `onRefresh` into a cumulative refresh-waste ratio.
+2. **No waste/churn signal.** To separate "too small (thrash)" from "refreshing keys nobody reads," add a **capacity-eviction rate** (evictions / total requests) using `_windowEvictions` tracked per refresh window, and a **per-interval reuse measure** (`windowReuseRatio = windowHits / activeSize`) to replace the unbounded `hitSizeRatio`.
 
 > **✅ Verified `lru-cache` v11.5.1 `dispose` semantics (checked against installed `node_modules`, 2026-06-04):**
 > - `dispose(value, key, reason)` distinguishes the reasons we need: `DisposeReason = 'evict' | 'set' | 'delete' | 'expire' | 'fetch'`. **Capacity eviction (`'evict'`) and TTL expiry (`'expire'`) are separate reasons**, so thrash is distinguishable from normal aging. ✅
 > - **Caveat that shaped the design — TTL expiry is *lazy*.** Per the v11 docs: *"stale items are NOT preemptively removed by default … There is no pre-emptive pruning of expired items; it will treat expired items as missing when they are fetched, and delete them."* `refreshed-cache` constructs `new LRUCache({ max, ttl })` **without `ttlAutopurge`** (`index.js:133`), so a `'expire'` dispose fires only when an expired key is *touched* (a `get`) or when `purgeStale()` runs — **not at the instant of expiry.** Therefore a live `'expire'`-before-hit counter would under-count and is unreliable.
 > - **Design consequences:**
->   1. **Thrash detection → count `reason === 'evict'` only.** This fires *synchronously* on capacity eviction regardless of the lazy-expiry caveat, so it is a reliable churn signal. No per-key "was it hit?" bookkeeping is needed — high `'evict'` churn + low `hitRate` + high `utilization` is sufficient to infer thrash, which avoids adding per-entry hit-flag state to the hot path.
->   2. **Refresh-waste detection (anti-pattern 1) → use `onRefresh` `keysLoaded`/`keysUpdated`, NOT `'expire'` dispose.** Because expiry disposal is lazy, do not infer "keys nobody read" from `'expire'` events; derive it from the load-vs-update signal the refresh loop already emits.
+>   1. **Thrash detection → count `reason === 'evict'` only.** This fires *synchronously* on capacity eviction regardless of the lazy-expiry caveat, so it is a reliable churn signal. No per-key "was it hit?" bookkeeping is needed — high `'evict'` churn rate + low `hitRate` + high `utilization` is sufficient to infer thrash.
+>   2. **Refresh-waste detection (anti-pattern 1) → use per-interval `windowReuseRatio`.** Instead of a fixed lifetime `hitSizeRatio`, we track `_windowHits / activeSize` resetting each refresh interval to detect if the loaded keys are actually being used.
 >   3. `gain()` already calls `this._cache.purgeStale()` before sampling (`index.js:500`), so `activeSize` is accurate at report time — the lazy-expiry caveat does not distort the reported size, only the would-be `'expire'` counter.
 
 **New decision tree** (replaces the 3-way branch):
 
 | Signal pattern | Diagnosis | Advice |
 | :--- | :--- | :--- |
-| hit rate low + util high + **high** evict-churn | working set > `max` (thrash) | grow `max` or shrink hot set (anti-pattern 2) |
-| util high + **low** hitSizeRatio + low churn | refreshing keys nobody reads | switch to `passRecentKeysOnRefresh` / active-only (anti-pattern 1) |
+| hit rate low + util high + evict churn rate > 0.1 | working set > `max` (thrash) | grow `max` or shrink hot set (anti-pattern 2) |
+| util high + windowReuseRatio < 0.1 + low churn | refreshing keys nobody reads | switch to `passRecentKeysOnRefresh` / active-only (anti-pattern 1) |
 | hit rate low + low util | cache barely helps this workload | reconsider whether to cache here |
 | hit rate high + low util | over-provisioned | shrink `max` / lower TTL (current behavior) |
 | hit rate high + util high | healthy & near capacity | grow `max` (current behavior) |
 
-**Design — extract a pure function.** Pull the mapping into a standalone `_recommend({ hitRate, utilization, hitSizeRatio, evictChurn })` that returns a stable `{ code, message }`. This makes every branch and boundary trivially unit-testable in isolation and makes the thresholds reviewable in one place. Recommendations expose a stable `code` (e.g. `"thrash"`, `"refresh-waste"`, `"healthy"`) so consumers can alert on the enum, not parse English.
+**Design — extract a pure function.** Pull the mapping into a standalone `_recommend({ hitRate, utilization, evictChurn, windowReuseRatio, totalRequests })` that returns a stable `{ code, message }`. This makes every branch and boundary trivially unit-testable in isolation and makes the thresholds reviewable in one place. Recommendations expose a stable `code` (e.g. `"thrash"`, `"refresh-waste"`, `"healthy"`) so consumers can alert on the enum, not parse English.
 
 **Validation strategy — tests *and* a benchmark calibration witness, at different cadences.** This is the crux of the "do we need new benchmarks?" question; the honest answer is **no new benchmark script, but the existing ones must witness the thresholds**:
 

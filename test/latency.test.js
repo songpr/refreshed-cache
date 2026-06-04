@@ -39,7 +39,8 @@ describe("Tier 2.5 Latency and Gain Metrics", () => {
         expect(m.batchFetchLatency).toEqual({ minMs: 0, avgMs: 0, maxMs: 0 });
         expect(m.refreshLatency.avgMs).toBeGreaterThanOrEqual(0); // init performs a refresh loop/setup
         expect(m.timeSavedMs).toBe(0);
-        expect(m.hitSpeedup).toBe(0);
+        expect(m.hitRate).toBe(0);
+        expect(m.evictions).toBe(0);
         expect(m.batchPerKeyMs).toBe(0);
         expect(m.batchEfficiency).toBe(0);
     });
@@ -157,59 +158,42 @@ describe("Tier 2.5 Latency and Gain Metrics", () => {
         const m = cache.metrics;
         // The ratio is a latency ratio (fetch / hit), NOT an application speedup.
         expect(m.hitVsFetchLatencyRatio).toBeGreaterThan(1);
-        expect(m.hitVsFetchLatencyRatio).toBe(m.hitSpeedup); // back-compat alias
-        expect(cache.gain().hitVsFetchLatencyRatio).toBe(cache.gain().speedupFactor);
+        // The deprecated hitSpeedup / speedupFactor aliases were removed (never published);
+        // gain() exposes the same honestly-named ratio.
+        expect(cache.gain().hitVsFetchLatencyRatio).toBeGreaterThan(1);
     });
 
-    test("gain() method reports correct optimization recommendations", async () => {
-        // Scenario 1: Cache is disabled (max=0)
+    test("gain() exposes the documented report shape and disabled/gathering states", async () => {
+        // The recommendation-engine semantics (thrash / refresh-waste / over-provisioned /
+        // low-value) are covered exhaustively in test/recommend.test.js. Here we only verify
+        // gain()'s integration surface from the metrics side: the disabled branch, the
+        // "gathering data" guard, and the documented report fields.
+
+        // Cache disabled (max=0)
         const disabledCache = newCache(() => [], { max: 0 });
         await disabledCache.init();
-        let report = disabledCache.gain();
-        expect(report.recommendation).toBe("Cache is disabled (max=0).");
+        const disabled = disabledCache.gain();
+        expect(disabled.code).toBe("disabled");
+        expect(disabled.recommendation).toBe("Cache is disabled (max=0).");
 
-        // Scenario 2: Underutilized cache (low utilization and efficiency)
-        // Set max=1000, only cache 3 items, and make few queries
-        const underutilizedCache = newCache(() => [['a', 1], ['b', 2], ['c', 3]], {
+        // Populated cache below the request threshold -> "gathering data" guard
+        const cache = newCache(() => [['a', 1], ['b', 2], ['c', 3]], {
             max: 1000,
             maxAge: 300,
-            latencySampleRate: 1.0,
-            fetchByKey: async (k) => `val-${k}`
+            latencySampleRate: 1.0
         });
-        await underutilizedCache.init();
-        // Make 1 hit (hit/size ratio = 1/3 = 0.333, utilization = 3/1000 = 0.003)
-        underutilizedCache.get('a');
-        report = underutilizedCache.gain();
+        await cache.init();
+        cache.get('a'); // 1 request, well below the 100-request threshold
+
+        const report = cache.gain();
+        expect(report.code).toBe("healthy");
+        expect(report.recommendation).toMatch(/Gathering data/);
+        // Documented report fields are all present
+        expect(report).toHaveProperty("timeSavedMs");
+        expect(report).toHaveProperty("hitVsFetchLatencyRatio");
+        expect(report).toHaveProperty("activeSize");
+        expect(report).toHaveProperty("hitSizeRatio");
+        expect(report).toHaveProperty("utilization");
         expect(report.utilization).toBeLessThan(0.2);
-        expect(report.hitSizeRatio).toBeLessThan(0.5);
-        expect(report.recommendation).toBe("Cache is underutilized. Consider decreasing max size or lowering TTL.");
-
-        // Scenario 3: High efficiency and near capacity (high utilization and high hit/size ratio)
-        // Set max=2, cache 2 items, make 5 hits
-        const highEffCache = newCache(() => [['a', 1], ['b', 2]], {
-            max: 2,
-            maxAge: 300,
-            latencySampleRate: 1.0
-        });
-        await highEffCache.init();
-        for (let i = 0; i < 5; i++) {
-            highEffCache.get('a');
-        }
-        report = highEffCache.gain();
-        expect(report.utilization).toBeGreaterThanOrEqual(0.8);
-        expect(report.hitSizeRatio).toBeGreaterThan(2);
-        expect(report.recommendation).toBe("High efficiency and near-capacity. Consider increasing max size to capture more hits.");
-
-        // Scenario 4: Optimal cache sizing
-        // Set max=10, cache 5 items, make 1 hit (utilization = 0.5, hit/size ratio = 0.2)
-        const optimalCache = newCache(() => [['a', 1], ['b', 2], ['c', 3], ['d', 4], ['e', 5]], {
-            max: 10,
-            maxAge: 300,
-            latencySampleRate: 1.0
-        });
-        await optimalCache.init();
-        optimalCache.get('a');
-        report = optimalCache.gain();
-        expect(report.recommendation).toBe("Cache size and TTL are optimal for the current workload.");
     });
 });

@@ -1,10 +1,11 @@
 const { expect, test } = require("@jest/globals");
 const DataCache = require("../index");
-const { delay } = require("./helpers");
+const { delay, trackCaches } = require("./helpers");
+const newCache = trackCaches();
 
 test("hits and misses metrics are tracked correctly", async () => {
     const fetch = () => [['a', 1], ['b', 2]];
-    const cache = new DataCache(fetch, { maxAge: 10, refreshAge: 10 });
+    const cache = newCache(fetch, { maxAge: 10, refreshAge: 10 });
     await cache.init();
 
     expect(cache.metrics.hits).toBe(0);
@@ -50,7 +51,7 @@ test("onRefresh callback is invoked with correct stats", async () => {
         return data;
     };
     
-    const cache = new DataCache(fetch, {
+    const cache = newCache(fetch, {
         maxAge: 10,
         refreshAge: 10,
         onRefresh: (stats) => {
@@ -76,7 +77,7 @@ test("onRefresh callback is invoked with correct stats", async () => {
 
     // Custom isEqual comparison
     let customIsEqualCalled = false;
-    const cacheCustom = new DataCache(fetch, {
+    const cacheCustom = newCache(fetch, {
         maxAge: 10,
         refreshAge: 10,
         isEqual: (a, b) => {
@@ -103,7 +104,7 @@ test("onError callback is invoked on refresh error", async () => {
         throw new Error("simulated fetch error");
     };
 
-    const cache = new DataCache(fetch, {
+    const cache = newCache(fetch, {
         maxAge: 1,
         refreshAge: 1,
         onError: (err) => {
@@ -121,7 +122,7 @@ test("onError callback is invoked on refresh error", async () => {
 
 test("checkValidity evicts invalid items and increments invalidations counter", async () => {
     const fetch = () => [['a', 10], ['b', 20]];
-    const cache = new DataCache(fetch, {
+    const cache = newCache(fetch, {
         maxAge: 10,
         refreshAge: 10,
         checkValidity: (key, value) => {
@@ -174,7 +175,7 @@ test("observability hooks & metrics validity under sustained concurrent load for
     let customEqualCalls = 0;
     let validityChecks = 0;
     
-    const cache = new DataCache(
+    const cache = newCache(
         async () => {
             dbQueries++;
             return Array.from(dbStore.entries());

@@ -1,6 +1,7 @@
 const { expect, test } = require("@jest/globals");
 const DataCache = require("../index");
-const { delay } = require("./helpers");
+const { delay, trackCaches } = require("./helpers");
+const newCache = trackCaches();
 
 test("getOrFetchMany coalesces concurrent overlapping batch fetches", async () => {
     let fetchCount = 0;
@@ -10,7 +11,7 @@ test("getOrFetchMany coalesces concurrent overlapping batch fetches", async () =
         return keys.map(k => [k, k + "-val"]);
     };
 
-    const cache = new DataCache(() => [], {
+    const cache = newCache(() => [], {
         maxAge: 10,
         refreshAge: 10,
         fetchByKeys
@@ -47,7 +48,7 @@ test("getOrFetch and getOrFetchMany coalesce keys seamlessly", async () => {
         return keys.map(k => [k, k + "-val"]);
     };
 
-    const cache = new DataCache(() => [], {
+    const cache = newCache(() => [], {
         maxAge: 10,
         refreshAge: 10,
         fetchByKey,

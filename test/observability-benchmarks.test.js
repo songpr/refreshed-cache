@@ -1,5 +1,7 @@
 const { expect, test } = require("@jest/globals");
 const DataCache = require("../index");
+const { trackCaches } = require("./helpers");
+const newCache = trackCaches();
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -30,7 +32,7 @@ test("mimic 1: Miss-Cache Benchmark (5s)", async () => {
     const bogusKeys = Array.from({ length: 50 }, (_, i) => `bogus-${i}`);
 
     let mockQueries = 0;
-    const cache = new DataCache(
+    const cache = newCache(
         async () => {
             mockQueries++;
             return validKeys.map(k => [k, { name: k }]);
@@ -133,7 +135,7 @@ test("mimic 2: Load Test (5s)", async () => {
     const keysUniverse = Array.from({ length: 1000 }, (_, i) => `key-${i}`);
 
     let mockQueries = 0;
-    const cache = new DataCache(
+    const cache = newCache(
         async () => {
             mockQueries++;
             return keysUniverse.slice(0, 100).map(k => [k, { name: k }]);
@@ -226,7 +228,7 @@ test("mimic 3: Long Running Benchmark (5s)", async () => {
 
     let mockQueries = 0;
     let totalQueries = 0;
-    const cache = new DataCache(
+    const cache = newCache(
         async () => {
             mockQueries++;
             totalQueries++;
@@ -322,7 +324,7 @@ test("mimic 4: New Features Benchmark (5s)", async () => {
 
     let mockQueries = 0;
     let totalQueries = 0;
-    const cache = new DataCache(
+    const cache = newCache(
         async () => {
             mockQueries++;
             totalQueries++;

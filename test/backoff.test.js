@@ -1,6 +1,7 @@
 const { expect, test } = require("@jest/globals");
 const DataCache = require("../index");
-const { flushPromises } = require("./helpers");
+const { flushPromises, trackCaches } = require("./helpers");
+const newCache = trackCaches();
 
 test("exponential backoff with jitter on refresh errors", async () => {
     jest.useFakeTimers();
@@ -11,7 +12,7 @@ test("exponential backoff with jitter on refresh errors", async () => {
         return [['a', 1]];
     };
 
-    const cache = new DataCache(fetch, {
+    const cache = newCache(fetch, {
         maxAge: 10,
         refreshAge: 10,
         backoffInitialDelay: 1, // 1s

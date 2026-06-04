@@ -1,4 +1,6 @@
 const DataCache = require('../index.js');
+const { trackCaches } = require('./helpers');
+const newCache = trackCaches();
 const {
     makeBogusPool,
     selectKey,
@@ -76,7 +78,7 @@ describe('miss-cache effect against the real DataCache', () => {
 
     async function run(maxMiss) {
         let bogusDbCalls = 0;
-        const cache = new DataCache(async () => [], {
+        const cache = newCache(async () => [], {
             max: 100000,
             maxAge: 300,
             refreshAge: 300,
