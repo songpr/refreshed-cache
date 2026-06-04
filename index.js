@@ -314,7 +314,7 @@ class DataCache {
             const nextIterator = isAsyncIterator ? dataIterator[Symbol.asyncIterator]() : dataIterator[Symbol.iterator]();
             const firstItdata = isAsyncIterator ? await nextIterator.next() : nextIterator.next();
             
-            if (firstItdata.done === true || !Array.isArray(firstItdata.value)) {
+            if (firstItdata.done || !Array.isArray(firstItdata.value)) {
                 this._refreshes++;
                 if (this._onRefresh) {
                     this._onRefresh({ durationMs: Date.now() - startTime, keysLoaded: 0, keysUpdated: 0 });
@@ -354,10 +354,10 @@ class DataCache {
             this._cache.set(firstItem.key, firstItem.value);
             
             let i = 1; //start from 1 since we already read 1
-            if (firstItdata.done != true) {
-                //async iterator
-                for await (const [key, value] of nextIterator) {
-                    if ((++i) > this.max) break; // add items do not exceed max
+            //async iterator
+            for await (const [key, value] of nextIterator) {
+                    if (i >= this.max) break; // add items do not exceed max
+                    i++;
                     
                     if (this.resetOnRefresh == true) {
                         const hasOld = oldValues.has(key);
@@ -376,8 +376,7 @@ class DataCache {
                     }
                     this._cache.set(key, value);
                 }
-            }
-            
+
             this._refreshes++;
             if (this._onRefresh) {
                 this._onRefresh({ durationMs: Date.now() - startTime, keysLoaded: i, keysUpdated });
@@ -630,14 +629,15 @@ class DataCache {
 
                     const resolved = await Promise.all(promisesToAwait);
                     for (const [k, v] of resolved) {
-                        if (v !== undefined && keys.includes(k)) {
+                        if (v !== undefined) {
                             result[k] = v;
                         }
                     }
                 }
             } else {
-                // Fallback to calling getOrFetch for each key concurrently (passing false to avoid double counting)
+                // Fallback to calling getOrFetch for each key concurrently (passing false to avoid double counting _misses)
                 const promises = missingKeys.map(async (key) => {
+                    if (this._pendingFetches.has(key)) this._coalescedFetches++;
                     const val = await this.getOrFetch(key, false);
                     return [key, val];
                 });
@@ -665,6 +665,7 @@ class DataCache {
                 this._cache.delete(key);
                 if (this._missCache !== undefined) this._missCache.delete(key);
                 this._invalidations++;
+                this._misses++;
                 return false;
             }
             return true;

@@ -137,9 +137,10 @@ test("checkValidity evicts invalid items and increments invalidations counter", 
     expect(cache.metrics.invalidations).toBe(1);
 
     // Read 'a' (should get undefined and be a miss, not increment invalidations again)
+    // misses=2: 1 from has('a') invalidation + 1 from get('a') not found
     expect(cache.get('a')).toBe(undefined);
     expect(cache.metrics.invalidations).toBe(1);
-    expect(cache.metrics.misses).toBe(1);
+    expect(cache.metrics.misses).toBe(2);
     expect(cache.metrics.hits).toBe(0);
 
     // Call has('b') (valid, should return true and not affect metrics)
