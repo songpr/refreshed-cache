@@ -188,10 +188,10 @@ test("maxAge expired, maxAge > refreshAge, resetOnRefresh = false", async () => 
     expect(cache.size).toEqual(9);//9 have 3 round of items
     await delay(1200);
     //first round item expired now
-    expect(cache.size).toEqual(9);//9 because expired items are removed after refresh, so have 3 round of items
     expect(cache.get("a_1")).toEqual(undefined);
     expect(cache.get("b_1")).toEqual(undefined);
     expect(cache.get("c_1")).toEqual(undefined);
+    expect(cache.size).toEqual(9);//9 because expired items are removed on access/purge, leaving 3 rounds (2, 3, 4)
     expect(cache.get("a_4")).toEqual(4);
     expect(cache.get("b_4")).toEqual(8);
     expect(cache.get("c_4")).toEqual(12);
