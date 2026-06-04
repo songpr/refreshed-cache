@@ -316,6 +316,25 @@ Compares `New Caching Logic` (Request Coalescing (single-flight), Batch Loading,
 3. **Observability & Validity Hooks have Negligible Overhead**: Enabling retrieve-time `checkValidity` (executing a structure/type check on every read) and tracking metrics (`hits`, `misses`, `coalescedFetches`, `invalidations`) incurs no observable performance penalty. The cache still performs at ~25,000+ rps with sub-millisecond overhead.
 4. **Batch Single-Flight Coalescing**: When concurrent requests trigger overlapping batch fetches (`getOrFetchMany`), keys already in-flight are coalesced rather than queried redundantly, further capping database QPS.
 
+### 5-Round Variance Data (30s per round)
+| Round | Strategy | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | DB Queries | Heap Growth | Correctness |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **1** | **Direct** | 19,543 rps | 6.12ms | 16.06ms | 207.88ms | 87,750 | +25.28 MB | ✅ PASSED |
+| **1** | **lru-cache** | 24,788 rps | 12.01ms | 19.43ms | 25.57ms | 60,114 | +53.67 MB | ✅ PASSED |
+| **1** | **refreshed-cache** | **25,251 rps** | **11.82ms** | **18.48ms** | **23.19ms** | **54,042** | **+56.90 MB** | ✅ PASSED |
+| **2** | **Direct** | 19,653 rps | 5.77ms | 14.81ms | 207.48ms | 89,100 | +26.75 MB | ✅ PASSED |
+| **2** | **lru-cache** | 25,253 rps | 11.97ms | 19.38ms | 26.95ms | 60,815 | +53.73 MB | ✅ PASSED |
+| **2** | **refreshed-cache** | **25,256 rps** | **11.69ms** | **18.81ms** | **25.47ms** | **54,126** | **+54.48 MB** | ✅ PASSED |
+| **3** | **Direct** | 20,679 rps | 5.97ms | 15.50ms | 209.23ms | 93,700 | +29.58 MB | ✅ PASSED |
+| **3** | **lru-cache** | 25,400 rps | 11.82ms | 18.98ms | 26.62ms | 61,077 | +53.45 MB | ✅ PASSED |
+| **3** | **refreshed-cache** | **25,347 rps** | **11.65ms** | **18.96ms** | **24.97ms** | **54,581** | **+56.35 MB** | ✅ PASSED |
+| **4** | **Direct** | 21,294 rps | 5.95ms | 13.85ms | 206.93ms | 95,550 | +23.89 MB | ✅ PASSED |
+| **4** | **lru-cache** | 24,647 rps | 11.87ms | 19.21ms | 26.03ms | 58,858 | +56.13 MB | ✅ PASSED |
+| **4** | **refreshed-cache** | **25,613 rps** | **11.58ms** | **17.85ms** | **22.78ms** | **55,217** | **+60.07 MB** | ✅ PASSED |
+| **5** | **Direct** | 19,741 rps | 6.14ms | 16.54ms | 208.11ms | 88,800 | +23.70 MB | ✅ PASSED |
+| **5** | **lru-cache** | 24,405 rps | 12.16ms | 18.45ms | 23.83ms | 58,953 | +54.06 MB | ✅ PASSED |
+| **5** | **refreshed-cache** | **23,495 rps** | **11.84ms** | **19.78ms** | **29.22ms** | **50,765** | **+58.51 MB** | ✅ PASSED |
+
 ---
 
 ### E. Cache-Penetration Attack Protection (Miss-Cache, 5 Rounds, 60s with TTL Cycling)
