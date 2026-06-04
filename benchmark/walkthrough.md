@@ -77,19 +77,20 @@ We instrumented all benchmark scripts (`benchmark/run-benchmark.js`, `run-load-t
 ## Verification Results
 
 ### New Test Suites Exposing the Capabilities
-We created three comprehensive test suites under `test/`:
-1. `test/observability.test.js`: Verifies hits, misses, refreshes, invalidations, and value mismatch metrics and callbacks.
-2. `test/backoff.test.js`: Verifies exponential backoff delay calculation, capping, retry resets, and fake timer advances.
-3. `test/batchCoalescing.test.js`: Verifies that concurrent `getOrFetchMany` calls and concurrent mixed `getOrFetch` / `getOrFetchMany` calls coalesce keys and reduce backend fetches.
+We created four comprehensive test/benchmark-mimic suites under `test/`:
+1. `test/observability.test.js`: Verifies hits, misses, refreshes, invalidations, and value mismatch metrics and callbacks, including a 5-second concurrent soak test.
+2. `test/observability-mimic.test.js`: Specifically mimics the local/in-memory, mock-based workload shapes of all 4 benchmarks for exactly 5 seconds each, displaying the identical logging format and metrics checks.
+3. `test/backoff.test.js`: Verifies exponential backoff delay calculation, capping, retry resets, and fake timer advances.
+4. `test/batchCoalescing.test.js`: Verifies that concurrent `getOrFetchMany` calls and concurrent mixed `getOrFetch` / `getOrFetchMany` calls coalesce keys and reduce backend fetches.
 
 ### Automated Test Execution
 All unit tests and type checks passed successfully:
 ```bash
 npm test
 # Output:
-# Test Suites: 1 skipped, 20 passed, 20 of 21 total
-# Tests:       1 skipped, 96 passed, 97 total
+# Test Suites: 1 skipped, 21 passed, 21 of 22 total
+# Tests:       1 skipped, 101 passed, 102 total
 # Snapshots:   0 total
-# Time:        92.521 s
+# Time:        94.849 s
 # Ran all test suites.
 ```
