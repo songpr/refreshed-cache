@@ -119,9 +119,9 @@ Simulates 50,000 read queries with a realistic traffic distribution of 70% cache
 
 | Round | Scenario | Cache Size | Init Time | DB Ops/sec | DB Queries Direct | Cache Ops/sec | DB Queries Cache | Speedup | Correctness | Heap Mem | RSS Mem |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Round 1** | Small Cache (1% coverage) | 10,000 | 33 ms | 22,404 | 50,000 | 53,496 | 21,045 | **2.39x** | ✅ PASSED | 4.22 MB | 18.31 MB |
-| **Round 1** | Medium Cache (10% coverage) | 100,000 | 162 ms | 12,325 | 50,000 | 92,693 | 16,510 | **7.52x** | ✅ PASSED | 39.96 MB | 112.35 MB |
-| **Round 1** | Large Cache (50% coverage) | 500,000 | 1,719 ms | 5,902 | 50,000 | 108,759 | 15,373 | **18.43x** | ✅ PASSED | 194.81 MB | 208.75 MB |
+| **Round 1** | Small Cache (1% coverage) | 10,000 | 29 ms | 33,089 | 50,000 | 106,344 | 20,837 | **3.21x** | ✅ PASSED | 4.26 MB | 15.01 MB |
+| **Round 1** | Medium Cache (10% coverage) | 100,000 | 148 ms | 17,851 | 50,000 | 129,549 | 16,291 | **7.26x** | ✅ PASSED | 39.94 MB | 139.67 MB |
+| **Round 1** | Large Cache (50% coverage) | 500,000 | 630 ms | 21,328 | 50,000 | 133,483 | 15,158 | **6.26x** | ✅ PASSED | 194.18 MB | 207.16 MB |
 | **Round 2** | Small Cache (1% coverage) | 10,000 | 24 ms | 29,597 | 50,000 | 50,253 | 21,028 | **1.70x** | ✅ PASSED | 4.24 MB | 17.29 MB |
 | **Round 2** | Medium Cache (10% coverage) | 100,000 | 142 ms | 16,374 | 50,000 | 44,294 | 16,443 | **2.71x** | ✅ PASSED | 39.93 MB | 114.64 MB |
 | **Round 2** | Large Cache (50% coverage) | 500,000 | 677 ms | 17,394 | 50,000 | 73,990 | 15,199 | **4.25x** | ✅ PASSED | 194.81 MB | 189.03 MB |
@@ -143,10 +143,10 @@ Evaluates strategies under a shifting hot key load (sliding window) using a stri
 
 | Strategy | Hit Rate | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | DB Queries | Peak Heap | Base Heap | Heap Growth | Cleaned Heap | Correctness |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **[R1] Direct Prepared Statements** | 0% | 2000 rps | 0.12 ms | 0.92 ms | 1.52 ms | 600 | 25.79 MB | 5.82 MB | +19.97 MB | 24.89 MB | N/A |
-| **[R1] Strategy A: Scheduled Full Refresh** | 94.9% | 2000 rps | 0.07 ms | 0.29 ms | 2.06 ms | 53,427 | 69.66 MB | 5.82 MB | +63.84 MB | 28.35 MB | ✅ PASSED |
-| **[R1] Strategy B: Lazy Fetch-on-Miss** | 94.9% | 2000 rps | 0.04 ms | 0.16 ms | 2.05 ms | 51,272 | 46.01 MB | 5.82 MB | +40.19 MB | 28.55 MB | ✅ PASSED |
-| **[R1] Strategy C: Active-Only Refresh** | 94.9% | 2000 rps | 0.07 ms | 0.24 ms | 0.47 ms | 601 | 47.57 MB | 5.82 MB | +41.75 MB | 30.81 MB | ✅ PASSED |
+| **[R1] Direct Prepared Statements** | 0% | 2000 rps | 0.05 ms | 0.08 ms | 0.10 ms | 400 | 25.74 MB | 5.84 MB | +19.90 MB | 24.83 MB | N/A |
+| **[R1] Strategy A: Scheduled Full Refresh** | 95.1% | 2000 rps | 0.02 ms | 0.05 ms | 0.10 ms | 34,734 | 67.07 MB | 5.85 MB | +61.22 MB | 28.46 MB | ✅ PASSED |
+| **[R1] Strategy B: Lazy Fetch-on-Miss** | 95.1% | 2000 rps | 0.02 ms | 0.04 ms | 0.08 ms | 34,867 | 39.49 MB | 5.85 MB | +33.64 MB | 29.01 MB | ✅ PASSED |
+| **[R1] Strategy C: Active-Only Refresh** | 95.1% | 2000 rps | 0.04 ms | 0.06 ms | 0.09 ms | 401 | 39.80 MB | 5.84 MB | +33.96 MB | 30.72 MB | ✅ PASSED |
 | **[R2] Direct Prepared Statements** | 0% | 2000 rps | 0.05 ms | 0.19 ms | 0.41 ms | 600 | 25.79 MB | 5.83 MB | +19.96 MB | 24.89 MB | N/A |
 | **[R2] Strategy A: Scheduled Full Refresh** | 95.1% | 2000 rps | 0.08 ms | 0.36 ms | 0.80 ms | 53,468 | 69.03 MB | 5.83 MB | +63.20 MB | 28.32 MB | ✅ PASSED |
 | **[R2] Strategy B: Lazy Fetch-on-Miss** | 95.0% | 2000 rps | 0.05 ms | 1.13 ms | 2.08 ms | 51,172 | 45.24 MB | 5.82 MB | +39.42 MB | 28.57 MB | ✅ PASSED |
@@ -173,9 +173,9 @@ Compares in-process cache lookups against direct Postgres querying via optimized
 
 | Round | Strategy | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | Row-Exist Rate | DB Queries | Peak Heap | Base Heap | Heap Growth | Correctness |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Round 1** | Direct Prepared (No Cache) | 2,927 rps | 8.84 ms | 205.40 ms | 213.67 ms | 95.0% | 88,400 | 31.33 MB | 6.13 MB | +25.20 MB | PASSED |
-| **Round 1** | Lazy Fetch-on-Miss | 2,983 rps | 4.06 ms | 203.70 ms | 213.03 ms | 94.9% | 67,385 | 58.47 MB | 6.13 MB | +52.34 MB | PASSED |
-| **Round 1** | Active-Only Refresh | 2,870 rps | 4.50 ms | 203.87 ms | 218.25 ms | 94.9% | 65,207 | 60.27 MB | 6.13 MB | +54.14 MB | PASSED |
+| **Round 1** | Direct Prepared (No Cache) | 2,648 rps | 11.49 ms | 205.40 ms | 213.67 ms | 94.9% | 80,300 | 30.95 MB | 6.16 MB | +24.79 MB | PASSED |
+| **Round 1** | Lazy Fetch-on-Miss | 2,442 rps | 8.16 ms | 207.11 ms | 217.99 ms | 94.9% | 58,242 | 52.27 MB | 6.16 MB | +46.11 MB | PASSED |
+| **Round 1** | Active-Only Refresh | 2,546 rps | 7.79 ms | 206.92 ms | 216.02 ms | 94.9% | 60,070 | 52.71 MB | 6.16 MB | +46.55 MB | PASSED |
 | **Round 2** | Direct Prepared (No Cache) | 2,581 rps | 10.16 ms | 208.15 ms | 219.32 ms | 94.9% | 77,500 | 31.63 MB | 6.13 MB | +25.50 MB | PASSED |
 | **Round 2** | Lazy Fetch-on-Miss | 2,953 rps | 4.65 ms | 203.25 ms | 218.08 ms | 95.0% | 66,720 | 58.01 MB | 6.13 MB | +51.88 MB | PASSED |
 | **Round 2** | Active-Only Refresh | 3,530 rps | 3.33 ms | 201.23 ms | 212.90 ms | 95.0% | 76,050 | 66.46 MB | 6.13 MB | +60.33 MB | PASSED |
@@ -197,9 +197,9 @@ Compares `New Caching Logic` (Request Coalescing (single-flight), Batch Loading,
 
 | Strategy | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | DB Queries | Peak Heap | Base Heap | Heap Growth | Correctness |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **[R1] Direct Prepared** | 19,018 rps | 4.48 ms | 28.25 ms | 206.09 ms | 85,000 | 29.86 MB | 6.18 MB | +23.68 MB | ✅ PASSED |
-| **[R1] Old Caching Logic** | 8,895 rps | 20.18 ms | 217.66 ms | 239.39 ms | 135,776 | 55.19 MB | 6.18 MB | +49.01 MB | ✅ PASSED |
-| **[R1] New Caching Logic** | **24,104 rps** | **11.14 ms** | **19.95 ms** | **37.45 ms** | **51,895** | **61.36 MB** | 6.18 MB | **+55.18 MB** | ✅ PASSED |
+| **[R1] Direct Prepared** | 22,208 rps | 4.72 ms | 16.17 ms | 117.10 ms | 51,050 | 35.44 MB | 6.20 MB | +29.24 MB | ✅ PASSED |
+| **[R1] Old Caching Logic** | 9,475 rps | 23.98 ms | 228.40 ms | 245.14 ms | 93,272 | 51.89 MB | 6.20 MB | +45.69 MB | ✅ PASSED |
+| **[R1] New Caching Logic** | **23,646 rps** | **12.66 ms** | **22.88 ms** | **37.76 ms** | **27,903** | **64.72 MB** | 6.20 MB | **+58.52 MB** | ✅ PASSED |
 | **[R2] Direct Prepared** | 17,573 rps | 4.38 ms | 51.50 ms | 207.79 ms | 79,750 | 33.02 MB | 6.18 MB | +26.84 MB | ✅ PASSED |
 | **[R2] Old Caching Logic** | 8,262 rps | 21.33 ms | 220.29 ms | 238.86 ms | 129,222 | 54.47 MB | 6.18 MB | +48.29 MB | ✅ PASSED |
 | **[R2] New Caching Logic** | **24,611 rps** | **11.25 ms** | **18.94 ms** | **32.33 ms** | **53,127** | **63.94 MB** | 6.18 MB | **+57.76 MB** | ✅ PASSED |
@@ -227,9 +227,9 @@ Models a cache-penetration **attack**: 50% of traffic hammers a fixed pool of **
 
 | Round | Strategy | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | DB Queries | Peak Heap | Base Heap | Heap Growth |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **R1** | Direct Prepared (No Cache) | 1,883 rps | 9.16 ms | 17.16 ms | 113.78 ms | 113,400 | 8.55 MB | 5.81 MB | +2.74 MB |
-| **R1** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,972 rps | 0.69 ms | 8.05 ms | 11.02 ms | 57,078 | 13.17 MB | 5.81 MB | +7.36 MB |
-| **R1** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,027 rps | **0.08 ms** | **0.15 ms** | **0.20 ms** | **3,070** | 13.27 MB | 5.81 MB | +7.46 MB |
+| **R1** | Direct Prepared (No Cache) | 1,890 rps | 5.79 ms | 10.72 ms | 203.36 ms | 38,100 | 8.10 MB | 5.83 MB | +2.27 MB |
+| **R1** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,916 rps | 1.30 ms | 7.10 ms | 9.25 ms | 18,718 | 13.30 MB | 5.83 MB | +7.47 MB |
+| **R1** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 8`) | 2,010 rps | **0.08 ms** | **2.10 ms** | **4.01 ms** | **2,829** | 13.40 MB | 5.83 MB | +7.57 MB |
 | **R2** | Direct Prepared (No Cache) | 1,842 rps | 8.78 ms | 16.99 ms | 111.38 ms | 111,100 | 8.57 MB | 5.81 MB | +2.76 MB |
 | **R2** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,957 rps | 1.03 ms | 8.60 ms | 19.70 ms | 56,751 | 13.28 MB | 5.81 MB | +7.47 MB |
 | **R2** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,023 rps | **0.06 ms** | **0.14 ms** | **0.18 ms** | **3,062** | 13.35 MB | 5.81 MB | +7.54 MB |
