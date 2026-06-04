@@ -1,9 +1,25 @@
 const { expect } = require("@jest/globals");
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+let activeCaches = [];
+afterEach(async () => {
+    for (const cache of activeCaches) {
+        try {
+            await cache.close();
+        } catch (e) {}
+    }
+    activeCaches = [];
+});
+
+function newCache(fetch, options) {
+    const cache = new (require("../index"))(fetch, options);
+    activeCaches.push(cache);
+    return cache;
+}
+
 test("manual refresh", async () => {
     const fetch = () => Object.entries({ a: 1, b: 2, c: 3 });
-    const cache = new (require("../index"))(fetch, { maxAge: 1, refreshAge: 2 });
+    const cache = newCache(fetch, { maxAge: 1, refreshAge: 2 });
     await cache.init();
     expect(cache.get("a")).toEqual(1);
     expect(cache.get("b")).toEqual(2);
@@ -37,7 +53,7 @@ test("fetch refresh cache every 1 sec", async () => {
         round++
         return entires;
     };
-    const cache = new (require("../index"))(fetch, { maxAge: 1 });
+    const cache = newCache(fetch, { maxAge: 1 });
     await cache.init()
     //loop 3 round
     let i = 1
@@ -81,7 +97,7 @@ test("maxAge expired, maxAge < refreshAge", async () => {
         round++
         return entires;
     };
-    const cache = new (require("../index"))(fetch, { maxAge: 1, refreshAge: 2 });
+    const cache = newCache(fetch, { maxAge: 1, refreshAge: 2 });
     await cache.init()
     expect(cache.get("a")).toEqual(1);
     expect(cache.get("b")).toEqual(2);
@@ -116,7 +132,7 @@ test("maxAge expired, maxAge > refreshAge, resetOnRefresh=true", async () => {
         round++
         return entires;
     };
-    const cache = new (require("../index"))(fetch, { maxAge: 2, refreshAge: 1 });
+    const cache = newCache(fetch, { maxAge: 2, refreshAge: 1 });
     await cache.init()
     expect(cache.get("a_1")).toEqual(1);
     expect(cache.get("b_1")).toEqual(2);
@@ -156,7 +172,7 @@ test("maxAge expired, maxAge > refreshAge, resetOnRefresh = false", async () => 
         round++
         return entires;
     };
-    const cache = new (require("../index"))(fetch, { maxAge: 2, refreshAge: 1, resetOnRefresh: false });
+    const cache = newCache(fetch, { maxAge: 2, refreshAge: 1, resetOnRefresh: false });
     await cache.init()
     expect(cache.get("a_1")).toEqual(1);
     expect(cache.get("b_1")).toEqual(2);
