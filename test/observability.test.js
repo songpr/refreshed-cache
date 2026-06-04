@@ -148,3 +148,104 @@ test("checkValidity evicts invalid items and increments invalidations counter", 
 
     await cache.close();
 });
+
+test("observability hooks & metrics validity under sustained concurrent load for 5 seconds", async () => {
+    // 1. Mock DB store
+    const dbStore = new Map();
+    for (let i = 0; i < 50; i++) {
+        dbStore.set(`key-${i}`, { val: i, version: 1 });
+    }
+
+    let dbQueries = 0;
+    const fetchByKey = async (key) => {
+        dbQueries++;
+        await delay(5); // simulate DB network latency
+        return dbStore.get(key);
+    };
+
+    // 2. Instantiate Cache
+    let refreshCallbacks = 0;
+    let customEqualCalls = 0;
+    let validityChecks = 0;
+    
+    const cache = new DataCache(
+        async () => {
+            dbQueries++;
+            return Array.from(dbStore.entries());
+        },
+        {
+            max: 30, // smaller than 50 to force evictions/misses
+            maxAge: 1, // short TTL to trigger refetches/stale lookups
+            refreshAge: 1, // refresh every second
+            fetchByKey,
+            onRefresh: () => {
+                refreshCallbacks++;
+            },
+            checkValidity: (key, value) => {
+                validityChecks++;
+                return value.version > 0;
+            },
+            isEqual: (a, b) => {
+                customEqualCalls++;
+                return a.val === b.val && a.version === b.version;
+            }
+        }
+    );
+
+    await cache.init();
+
+    // 3. Run workload for 5 seconds
+    let totalOps = 0;
+    let isRunning = true;
+
+    // Background worker making concurrent requests
+    const worker = async () => {
+        const keys = Array.from({ length: 70 }, (_, i) => `key-${i}`); // mix of hits, misses, and out-of-bounds keys
+        while (isRunning) {
+            const batch = Array.from({ length: 10 }, () => {
+                const key = keys[Math.floor(Math.random() * keys.length)];
+                totalOps++;
+                return cache.getOrFetch(key);
+            });
+            await Promise.all(batch);
+            await delay(10); // rate limit loop slightly
+        }
+    };
+
+    // Background writer modifying values to trigger refreshes/mismatches/invalidations
+    const writer = async () => {
+        while (isRunning) {
+            await delay(800);
+            // Randomly update some keys to cause mismatches on refresh
+            const keyToUpdate = `key-${Math.floor(Math.random() * 50)}`;
+            const oldVal = dbStore.get(keyToUpdate);
+            if (oldVal) {
+                dbStore.set(keyToUpdate, { val: oldVal.val, version: oldVal.version + 1 });
+            }
+        }
+    };
+
+    const workerPromises = Array.from({ length: 5 }, () => worker());
+    const writerPromise = writer();
+
+    // Run for 5 seconds
+    await delay(5000);
+
+    isRunning = false;
+    await Promise.all([...workerPromises, writerPromise]);
+
+    // 4. Assert and Validate metrics consistency
+    const m = cache.metrics;
+    expect(m.hits + m.misses).toBe(totalOps);
+    expect(m.refreshes).toBe(refreshCallbacks);
+    
+    // We expect some refreshes to have run during 5 seconds (refreshAge is 1s)
+    expect(m.refreshes).toBeGreaterThanOrEqual(3); 
+    
+    // Expect some mismatches/updates to be tracked
+    expect(customEqualCalls).toBeGreaterThan(0);
+    
+    // Cleanup
+    await cache.close();
+}, 8000); // 8 seconds test timeout limit
+
