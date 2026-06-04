@@ -71,6 +71,14 @@ const STRATEGIES = [
                         const [row] = await trackedSql`SELECT uuid, name FROM users WHERE uuid = ${key}`;
                         return row || undefined;
                     },
+                    onRefresh: (stats) => {},
+                    onError: (err) => { console.error(err); },
+                    checkValidity: (key, value) => {
+                        return value && typeof value === 'object' && typeof value.name === 'string';
+                    },
+                    isEqual: (a, b) => {
+                        return a && b && a.name === b.name;
+                    }
                 }
             );
             await cache.init();
@@ -94,6 +102,14 @@ const STRATEGIES = [
                         const [row] = await trackedSql`SELECT uuid, name FROM users WHERE uuid = ${key}`;
                         return row || undefined;
                     },
+                    onRefresh: (stats) => {},
+                    onError: (err) => { console.error(err); },
+                    checkValidity: (key, value) => {
+                        return value && typeof value === 'object' && typeof value.name === 'string';
+                    },
+                    isEqual: (a, b) => {
+                        return a && b && a.name === b.name;
+                    }
                 }
             );
             await cache.init();
@@ -147,6 +163,12 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
         }
         dbQueryCount = 0;
         totalDBQueries = 0;
+        cache._hits = 0;
+        cache._misses = 0;
+        cache._refreshes = 0;
+        cache._coalescedFetches = 0;
+        cache._mismatches = 0;
+        cache._invalidations = 0;
     }
 
     const startTime = Date.now();
@@ -215,7 +237,12 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
         const intervalDbQueries = dbQueryCount;
         dbQueryCount = 0;
 
-        console.log(`[${t * intervalSec}s] Throughput: ${throughput} rps | p50: ${pct.p50}ms | p95: ${pct.p95}ms | p99: ${pct.p99}ms | DB Queries: ${intervalDbQueries} | Heap: ${mem.heapUsed} MB`);
+        let metricsStr = '';
+        if (cache && cache.metrics) {
+            const m = cache.metrics;
+            metricsStr = ` | Hits: ${m.hits} | Misses: ${m.misses} | Coalesced: ${m.coalescedFetches} | Invalidations: ${m.invalidations}`;
+        }
+        console.log(`[${t * intervalSec}s] Throughput: ${throughput} rps | p50: ${pct.p50}ms | p95: ${pct.p95}ms | p99: ${pct.p99}ms | DB Queries: ${intervalDbQueries}${metricsStr} | Heap: ${mem.heapUsed} MB`);
 
         statsHistory.push({
             elapsed: t * intervalSec,
@@ -230,6 +257,14 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
 
     isRunning = false;
     await Promise.all(workerPromises);
+    totalRequests += intervalRequests;
+
+    if (cache) {
+        const m = cache.metrics;
+        const isOpsValid = (m.hits + m.misses === totalRequests);
+        console.log(`[Metrics Validation] Total Ops: ${totalRequests} | Metrics Hits+Misses: ${m.hits + m.misses} (Match: ${isOpsValid ? '✅' : '❌'})`);
+        console.log(`[Metrics Validation] Metrics: Hits: ${m.hits} | Misses: ${m.misses} | Coalesced: ${m.coalescedFetches} | Invalidations: ${m.invalidations} | Refreshes: ${m.refreshes}`);
+    }
 
     if (cache) await cache.close();
 

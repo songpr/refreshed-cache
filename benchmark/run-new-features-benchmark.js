@@ -11,10 +11,14 @@ const sql = postgres(connectionString, { max: 100 });
 
 // Bypassed cache subclass that disables promise coalescing (representing old caching logic)
 class DataCacheNoCoalescing extends DataCache {
-    async getOrFetch(key) {
+    async getOrFetch(key, _trackMetrics = true) {
         const value = this._cache.get(key);
-        if (value !== undefined) return value;
+        if (value !== undefined) {
+            if (_trackMetrics) this._hits++;
+            return value;
+        }
 
+        if (_trackMetrics) this._misses++;
         if (this._fetchByKey !== undefined) {
             if (this._missCache.peek(key) !== undefined) return undefined;
 
@@ -37,8 +41,10 @@ class DataCacheNoCoalescing extends DataCache {
         for (const key of keys) {
             const val = this._cache.get(key);
             if (val !== undefined) {
+                this._hits++;
                 result[key] = val;
             } else {
+                this._misses++;
                 missingKeys.push(key);
             }
         }
@@ -46,7 +52,7 @@ class DataCacheNoCoalescing extends DataCache {
         if (missingKeys.length > 0) {
             // Force individual getOrFetch (no batching)
             const promises = missingKeys.map(async (key) => {
-                const val = await this.getOrFetch(key);
+                const val = await this.getOrFetch(key, false);
                 return [key, val];
             });
             const resolved = await Promise.all(promises);
@@ -148,6 +154,16 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
     };
 
     const cache = await setupCacheFn(trackedSql);
+    dbQueryCount = 0;
+    totalDBQueries = 0;
+    if (cache) {
+        cache._hits = 0;
+        cache._misses = 0;
+        cache._refreshes = 0;
+        cache._coalescedFetches = 0;
+        cache._mismatches = 0;
+        cache._invalidations = 0;
+    }
 
     // Fetch UUID universe of 150,000 rows to simulate large key space
     const allRows = await sql`SELECT uuid FROM users LIMIT 150000`;
@@ -300,6 +316,7 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
 
     isRunning = false;
     await Promise.all(workerPromises);
+    totalRequests += intervalRequests;
 
     // ==========================================
     // VALIDITY OF RESULTS AFTER HEAVY LOAD
@@ -335,6 +352,13 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
     }
 
     if (cache) {
+        const m = cache.metrics;
+        const isOpsValid = (m.hits + m.misses === totalRequests);
+        const expectedDBQueries = (m.refreshes || 0) + (m.misses - m.coalescedFetches);
+        const isDbQueriesValid = (totalDBQueries <= expectedDBQueries);
+        console.log(`[Metrics Validation] Total Ops: ${totalRequests} | Metrics Hits+Misses: ${m.hits + m.misses} (Match: ${isOpsValid ? '✅' : '❌'})`);
+        console.log(`[Metrics Validation] DB Queries: ${totalDBQueries} | Expected: ${expectedDBQueries} (Match: ${isDbQueriesValid ? '✅' : '❌'}, saved ${expectedDBQueries - totalDBQueries} by miss-cache)`);
+        console.log(`[Metrics Validation] Metrics: Hits: ${m.hits} | Misses: ${m.misses} | Coalesced: ${m.coalescedFetches} | Invalidations: ${m.invalidations}`);
         await cache.close();
     }
     const finalMem = await measureMemory();

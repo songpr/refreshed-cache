@@ -26,6 +26,14 @@ const STRATEGIES = [
                     fetchByKey: async (key) => {
                         const [row] = await trackedSql`SELECT uuid, name, email, metadata FROM users WHERE uuid = ${key}`;
                         return row || undefined;
+                    },
+                    onRefresh: (stats) => {},
+                    onError: (err) => { console.error(err); },
+                    checkValidity: (key, value) => {
+                        return value && typeof value === 'object' && typeof value.name === 'string';
+                    },
+                    isEqual: (a, b) => {
+                        return a && b && a.name === b.name && a.email === b.email;
                     }
                 }
             );
@@ -47,6 +55,14 @@ const STRATEGIES = [
                     fetchByKey: async (key) => {
                         const [row] = await trackedSql`SELECT uuid, name, email, metadata FROM users WHERE uuid = ${key}`;
                         return row || undefined;
+                    },
+                    onRefresh: (stats) => {},
+                    onError: (err) => { console.error(err); },
+                    checkValidity: (key, value) => {
+                        return value && typeof value === 'object' && typeof value.name === 'string';
+                    },
+                    isEqual: (a, b) => {
+                        return a && b && a.name === b.name && a.email === b.email;
                     }
                 }
             );
@@ -79,6 +95,14 @@ const STRATEGIES = [
                     fetchByKey: async (key) => {
                         const [row] = await trackedSql`SELECT uuid, name, email, metadata FROM users WHERE uuid = ${key}`;
                         return row || undefined;
+                    },
+                    onRefresh: (stats) => {},
+                    onError: (err) => { console.error(err); },
+                    checkValidity: (key, value) => {
+                        return value && typeof value === 'object' && typeof value.name === 'string';
+                    },
+                    isEqual: (a, b) => {
+                        return a && b && a.name === b.name && a.email === b.email;
                     }
                 }
             );
@@ -109,6 +133,16 @@ async function runStrategySimulation(name, setupCacheFn, durationSec = 80, inter
     };
 
     const cache = await setupCacheFn(trackedSql);
+    dbQueryCount = 0;
+    totalDBQueries = 0;
+    if (cache) {
+        cache._hits = 0;
+        cache._misses = 0;
+        cache._refreshes = 0;
+        cache._coalescedFetches = 0;
+        cache._mismatches = 0;
+        cache._invalidations = 0;
+    }
 
     // Fetch 150,000 valid UUIDs from DB to use as our universe
     const allRows = await sql`SELECT uuid FROM users LIMIT 150000`;
@@ -193,7 +227,12 @@ async function runStrategySimulation(name, setupCacheFn, durationSec = 80, inter
         const intervalDbQueries = dbQueryCount;
         dbQueryCount = 0;
 
-        console.log(`[t=${elapsed}s] Cache Size: ${cacheSizeStr} | Throughput: ${throughput} rps | Hit Rate: ${currentHitRate}% | p50: ${pct.p50}ms, p95: ${pct.p95}ms, p99: ${pct.p99}ms | DB Queries: ${intervalDbQueries} | Heap: ${mem.heapUsed} MB | RSS: ${mem.rss} MB`);
+        let metricsStr = '';
+        if (cache && cache.metrics) {
+            const m = cache.metrics;
+            metricsStr = ` | Hits: ${m.hits} | Misses: ${m.misses} | Coalesced: ${m.coalescedFetches} | Invalidations: ${m.invalidations} | Refreshes: ${m.refreshes}`;
+        }
+        console.log(`[${elapsed}s] Cache Size: ${cacheSizeStr} | Throughput: ${throughput} rps | Hit Rate: ${currentHitRate}% | p50: ${pct.p50}ms | p95: ${pct.p95}ms | p99: ${pct.p99}ms | DB Queries: ${intervalDbQueries}${metricsStr} | Heap: ${mem.heapUsed} MB | RSS: ${mem.rss} MB`);
 
         history.push({
             elapsed,
@@ -240,6 +279,16 @@ async function runStrategySimulation(name, setupCacheFn, durationSec = 80, inter
         }
     } else {
         console.log('Direct DB Strategy (no cache to audit).');
+    }
+
+    if (cache) {
+        const m = cache.metrics;
+        const isOpsValid = (m.hits + m.misses === totalRequests);
+        const expectedDBQueries = (m.refreshes || 0) + (m.misses - m.coalescedFetches);
+        const isDbQueriesValid = (totalDBQueries <= expectedDBQueries);
+        console.log(`[Metrics Validation] Total Ops: ${totalRequests} | Metrics Hits+Misses: ${m.hits + m.misses} (Match: ${isOpsValid ? '✅' : '❌'})`);
+        console.log(`[Metrics Validation] DB Queries: ${totalDBQueries} | Expected: ${expectedDBQueries} (Match: ${isDbQueriesValid ? '✅' : '❌'}, saved ${expectedDBQueries - totalDBQueries} by miss-cache)`);
+        console.log(`[Metrics Validation] Metrics: Hits: ${m.hits} | Misses: ${m.misses} | Coalesced: ${m.coalescedFetches} | Invalidations: ${m.invalidations} | Refreshes: ${m.refreshes} | Mismatches: ${m.mismatches}`);
     }
 
     // Cleanup cache

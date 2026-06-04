@@ -81,6 +81,14 @@ async function runScenario(scenarioName, cacheSize, dbRowsCount, totalQueries = 
             fetchByKey: async (uuid) => {
                 const [row] = await trackedSql`SELECT uuid, name, email, metadata FROM users WHERE uuid = ${uuid}`;
                 return row || undefined;
+            },
+            onRefresh: (stats) => {},
+            onError: (err) => { console.error(err); },
+            checkValidity: (key, value) => {
+                return value && typeof value === 'object' && typeof value.name === 'string';
+            },
+            isEqual: (a, b) => {
+                return a && b && a.name === b.name && a.email === b.email;
             }
         }
     );
@@ -148,6 +156,14 @@ async function runScenario(scenarioName, cacheSize, dbRowsCount, totalQueries = 
 
     console.log(`Cache: ${cacheDuration.toFixed(0)}ms (${cacheOpsPerSec} ops/sec) | Hits found: ${cacheSuccessCount} | DB Queries: ${dbQueriesCache}`);
     console.log(`Correctness Check: ${correctnessFailed ? '❌ FAILED' : '✅ PASSED'}`);
+
+    const m = cache.metrics;
+    const isOpsValid = (m.hits + m.misses === totalQueries);
+    const expectedDBQueries = (m.refreshes || 0) + (m.misses - m.coalescedFetches);
+    const isDbQueriesValid = (dbQueriesCache <= expectedDBQueries);
+    console.log(`[Metrics Validation] Total Ops: ${totalQueries} | Metrics Hits+Misses: ${m.hits + m.misses} (Match: ${isOpsValid ? '✅' : '❌'})`);
+    console.log(`[Metrics Validation] DB Queries: ${dbQueriesCache} | Expected: ${expectedDBQueries} (Match: ${isDbQueriesValid ? '✅' : '❌'}, saved ${expectedDBQueries - dbQueriesCache} by miss-cache)`);
+    console.log(`[Metrics Validation] Metrics: Hits: ${m.hits} | Misses: ${m.misses} | Coalesced: ${m.coalescedFetches} | Invalidations: ${m.invalidations}`);
 
     // Clean up
     await cache.close();
