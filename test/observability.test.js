@@ -132,14 +132,19 @@ test("checkValidity evicts invalid items and increments invalidations counter", 
 
     expect(cache.metrics.invalidations).toBe(0);
 
-    // Read 'a' (should fail validity and be evicted)
+    // Call has('a') first (should fail validity, evict 'a', increment invalidations, and return false)
+    expect(cache.has('a')).toBe(false);
+    expect(cache.metrics.invalidations).toBe(1);
+
+    // Read 'a' (should get undefined and be a miss, not increment invalidations again)
     expect(cache.get('a')).toBe(undefined);
     expect(cache.metrics.invalidations).toBe(1);
     expect(cache.metrics.misses).toBe(1);
     expect(cache.metrics.hits).toBe(0);
 
-    // Check it was evicted
-    expect(cache.has('a')).toBe(false);
+    // Call has('b') (valid, should return true and not affect metrics)
+    expect(cache.has('b')).toBe(true);
+    expect(cache.metrics.invalidations).toBe(1);
 
     // Read 'b' (valid)
     expect(cache.get('b')).toBe(20);

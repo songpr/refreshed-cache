@@ -659,7 +659,17 @@ class DataCache {
      * @returns 
      */
     has(key) {
-        return this._cache.has(key);
+        const val = this._cache.peek(key);
+        if (val !== undefined) {
+            if (this._checkValidity && !this._checkValidity(key, val)) {
+                this._cache.delete(key);
+                if (this._missCache !== undefined) this._missCache.delete(key);
+                this._invalidations++;
+                return false;
+            }
+            return true;
+        }
+        return false;
     }
     async close() {
         if (this.isClose === true) return;//already close
