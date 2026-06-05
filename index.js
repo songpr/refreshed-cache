@@ -15,7 +15,7 @@ function getBackoffDelay(failureCount, initialDelayMs, maxDelayMs) {
     return tempDelay + jitter;
 }
 
-function _recommend({ hitRate, utilization, evictChurn, windowReuseRatio, totalRequests }) {
+function _recommend({ hitRate, utilization, evictChurn, windowReuseRatio, totalRequests, missProtectionRatio = 0, avgBatchSize = 0 }) {
     if (totalRequests < 100) {
         return { code: 'healthy', message: 'Gathering data. Not enough requests to make a full recommendation.' };
     }
@@ -24,6 +24,19 @@ function _recommend({ hitRate, utilization, evictChurn, windowReuseRatio, totalR
     }
     if (utilization > 0.8 && windowReuseRatio < 0.1 && evictChurn < 0.05) {
         return { code: 'refresh-waste', message: 'Refreshing unused keys. Consider switching to passRecentKeysOnRefresh (Active-Only).' };
+    }
+    // A low cache hit rate is NOT "low value" when the misses are cheap or protective.
+    // These two checks must precede the low-value branch, since both states present as
+    // (low hitRate + spare utilization) but are the library working as intended:
+    //   1. miss-protection — bogus-key floods absorbed by the miss-cache (counted as misses,
+    //      but they shield the backend instead of hitting it). See §E.
+    if (missProtectionRatio >= 0.2) {
+        return { code: 'miss-protected', message: 'Miss-cache is absorbing a high share of bogus-key lookups (penetration protection). Low hit rate here reflects shielded misses, not a sizing problem.' };
+    }
+    //   2. batch-efficiency — misses collapsed into batched fetches (one DB round trip per
+    //      batch), so backend load stays low despite a low hit rate. See §B.
+    if (hitRate < 0.5 && utilization < 0.8 && avgBatchSize >= 5) {
+        return { code: 'batch-efficient', message: 'Low hit rate, but misses are collapsed into batched fetches (getOrFetchMany), keeping backend load low. Working as intended for large/streaming working sets.' };
     }
     if (hitRate < 0.5 && utilization < 0.8) {
         return { code: 'low-value', message: 'Cache provides low value for this workload. Reconsider caching strategy here.' };
@@ -96,6 +109,10 @@ class DataCache {
         Object.defineProperty(this, "_lastWindowEvictions", { value: 0, writable: true, configurable: false, enumerable: false });
         Object.defineProperty(this, "_refreshes", { value: 0, writable: true, configurable: false, enumerable: false });
         Object.defineProperty(this, "_coalescedFetches", { value: 0, writable: true, configurable: false, enumerable: false });
+        // Requests short-circuited by the miss-cache (a known-bogus key absorbed without a
+        // fetch). High relative to total requests = penetration protection is doing real work
+        // even though these count as cache misses — see gain()/_recommend 'miss-protected'.
+        Object.defineProperty(this, "_missCacheHits", { value: 0, writable: true, configurable: false, enumerable: false });
         Object.defineProperty(this, "_mismatches", { value: 0, writable: true, configurable: false, enumerable: false });
         Object.defineProperty(this, "_invalidations", { value: 0, writable: true, configurable: false, enumerable: false });
         Object.defineProperty(this, "_failureCount", { value: 0, writable: true, configurable: false, enumerable: false });
@@ -516,8 +533,10 @@ class DataCache {
             },
             timeSavedMs,
             hitVsFetchLatencyRatio,
+            avgBatchSize,
             batchPerKeyMs,
-            batchEfficiency
+            batchEfficiency,
+            missCacheHits: this._missCacheHits
         };
     }
 
@@ -555,12 +574,17 @@ class DataCache {
         // Per-operation latency ratio (avg miss-fetch / avg hit), NOT a throughput speedup.
         const hitVsFetchLatencyRatio = m.hitVsFetchLatencyRatio;
 
+        // Fraction of all requests the miss-cache absorbed (penetration protection signal).
+        const missProtectionRatio = totalRequests > 0 ? m.missCacheHits / totalRequests : 0;
+
         const rec = _recommend({
             hitRate: m.hitRate,
             utilization,
             evictChurn,
             windowReuseRatio,
-            totalRequests
+            totalRequests,
+            missProtectionRatio,
+            avgBatchSize: m.avgBatchSize
         });
 
         return {
@@ -656,7 +680,10 @@ class DataCache {
 
         if (this._fetchByKey !== undefined) {
             // check miss cache key, if it has been fetched already or not.
-            if (this._missCache !== undefined && this._missCache.peek(key) !== undefined) return undefined;
+            if (this._missCache !== undefined && this._missCache.peek(key) !== undefined) {
+                if (_trackMetrics) this._missCacheHits++;
+                return undefined;
+            }
 
             // Promise Coalescing (Single-flight): merge duplicate requests into one promise
             if (this._pendingFetches.has(key)) {
@@ -731,7 +758,9 @@ class DataCache {
                 const actualMissing = this._missCache !== undefined
                     ? missingKeys.filter(k => this._missCache.peek(k) === undefined)
                     : missingKeys;
-                
+                // Keys filtered out here were absorbed by the miss-cache (no fetch issued).
+                this._missCacheHits += missingKeys.length - actualMissing.length;
+
                 if (actualMissing.length > 0) {
                     const coalescedKeys = [];
                     const keysToFetch = [];

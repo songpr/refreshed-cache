@@ -14,10 +14,10 @@ This directory contains a benchmark suite that compares the performance, memory 
 
 | Pattern | Why it works | Benchmark proof | How it was tested |
 | :--- | :--- | :--- | :--- |
-| **Per-key read paths** (ORM `findById`, REST `/resource/:id`, GraphQL N+1) | The no-cache baseline fires one query *per key*; the cache serves the hot fraction from memory. | **§A** — 50k per-key queries → ~16k (~3× DB-load cut), ~1.5–3× throughput, correctness ✅. | 50k lookups, 70% hit / 25% soft-miss / 5% hard-miss, vs a **per-key** `WHERE uuid=$1` baseline; exact query counter; per-round forked process. |
+| **Per-key read paths** (ORM `findById`, REST `/resource/:id`, GraphQL N+1) | The no-cache baseline fires one query *per key*; the cache serves the hot fraction from memory. | **§A** — 50k per-key queries → ~16k (**~3× DB-load cut**, the stable headline); throughput speedup is higher but noisy (~2–9×) on the 20M table, correctness ✅. | 50k lookups, 70% hit / 25% soft-miss / 5% hard-miss, vs a **per-key** `WHERE uuid=$1` baseline; exact query counter; per-round forked process. |
 | **Cache-penetration / hard-miss floods** (bogus IDs, scrapers, credential-stuffing) | `maxMiss` absorbs repeat lookups for non-existent keys in a bounded sidecar cache. | **§E** — 110k → ~3k DB queries (**~97%**), p99 200 ms → **0.2 ms**, +7.5 MB bounded heap. | Three-way: no-cache vs `maxMiss:0` vs `maxMiss` enabled; valid set **pre-warmed** to isolate the miss signal; `duration ≥ 2× maxAgeMiss` guard so expiry+refill cycles are observed; workload unit-tested (`test/miss-cache-workload.test.js`). |
-| **Thundering-herd spikes** (flash sale, breaking news → same hot key) | Single-flight coalescing merges concurrent misses for a key into one query. | **§D** — p99 ~240 ms → ~24–67 ms, ~63% fewer queries **vs the old per-key path**. | New path vs the library's own pre-coalescing path; concurrent workers with a 30% same-key burst; isolated process. ⚠️ vs a *no-latency local* direct baseline it's ~a wash — the win is over un-coalesced caching. |
-| **Datasets too large to hold fully** (millions of rows, hot subset) | Active-Only Refresh keeps only recently-used keys warm and refreshes them in one batched query. | **§B** — 95% hit rate over 10M rows from a **bounded ~44 MB** hot set; flat memory across 5 rounds. | Sliding hot-key window, strict 100k ceiling, `--expose-gc` quiesced heap, peak/base/cleaned heap tracked per forked round. |
+| **Thundering-herd spikes** (flash sale, breaking news → same hot key) | Single-flight coalescing merges concurrent misses for a key into one query. | **§D** — `refreshed-cache` matches raw `lru-cache` throughput (**~25k rps**, zero orchestration overhead) while coalescing trims DB queries below it (**~1.04M vs ~1.14M** / 600s); p99 ~27–38 ms vs Direct's ~186–209 ms. | refreshed-cache vs raw lru-cache vs Direct; concurrent workers with a 30% same-key burst; isolated process. ⚠️ the Direct baseline is *no-latency local* Postgres, so read §D as an overhead+coalescing check, not a throughput-vs-no-cache headline. |
+| **Datasets too large to hold fully** (millions of rows, hot subset) | Active-Only Refresh keeps only recently-used keys warm and refreshes them in one batched query. | **§B** — 95% hit rate over 20M rows from a **bounded ~44 MB** hot set; flat memory across 5 rounds. | Sliding hot-key window, strict 100k ceiling, `--expose-gc` quiesced heap, peak/base/cleaned heap tracked per forked round. |
 
 ### ❌ Where it does *not* help (anti-patterns, also benchmarked)
 
@@ -26,7 +26,7 @@ This directory contains a benchmark suite that compares the performance, memory 
 | **You already batch every read** (`WHERE id IN (...)`) and expect *fewer queries* | A batched baseline already bottoms out; the cache only ties it on query count. | **§B** — Direct (batched) ~600 queries vs cache ~601: a **tie**, not a reduction. The real gain shifts to latency/memory. | Same §B run; the no-cache arm sends 100-key `IN (...)` batches (`run-long-benchmark.js:191`). |
 | **Cache smaller than the working set** (hot set > `max`) | Constant eviction → constant miss refetches; behind a saturated pool, tail latency tracks the DB. | **§C** — 120k window vs 100k ceiling: only ~25% fewer queries, p99 ~210 ms ≈ direct. | Sustained 4-worker load, window deliberately over the ceiling; `Row-Exist Rate` (not hit rate) logged honestly. |
 | **Refreshing more than the active hot set** (scheduled *full* refresh, or lazy `fetchByKey`-per-miss, on a huge dataset) | Reloading keys demand hasn't revealed is wasted work; on a set bigger than `max`, every miss becomes its own round trip and misses dominate. | **§B** — Strategy A (full refresh, ~53k queries, ~67 MB peak) and B (lazy per-key, ~51k) fire **~90×** more queries than Strategy C's ~601 active-only refresh, for keys nobody asked for. | Same §B run; A/B reload/fetch beyond the active set, C replays `recentKeys` in one batched query — isolating the config difference. |
-| **Treating `gain()` "speedup"/"time saved" as throughput** | They're a per-op latency *ratio* and a counterfactual estimate, inflated by miss-fetch latency. | See §5 `cache.gain()` callouts and §8 — `Hit/Fetch latency ratio` ≠ application speedup (which is ~1.5–3×). | Hit latency is sampled (`latencySampleRate`) and timer-noise-bound at sub-µs; documented as a diagnostic, not a measurement. |
+| **Treating `gain()` "speedup"/"time saved" as throughput** | They're a per-op latency *ratio* and a counterfactual estimate, inflated by miss-fetch latency. | See §5 `cache.gain()` callouts and §8 — `Hit/Fetch latency ratio` ≠ application speedup (the real win is a stable ~3× DB-query reduction, §A, with noisier throughput). | Hit latency is sampled (`latencySampleRate`) and timer-noise-bound at sub-µs; documented as a diagnostic, not a measurement. |
 
 **Net:** reach for `refreshed-cache` when your reads are **per-key**, your **hot set fits in memory**, or you face a **hard-miss/penetration flood**. Don't expect it to beat code that already batches, and always size `max` to your working set. Every claim above is reproducible from §4; the methodology and its limits are in §8.
 
@@ -39,14 +39,14 @@ This directory contains a benchmark suite that compares the performance, memory 
 | `max` / `ttl` eviction | ✅ native (passed straight through) | — (delegates to lru-cache) |
 | Per-key loader + **single-flight coalescing** | ✅ `fetchMethod` already dedupes concurrent same-key fetches | Wraps the same idea via `fetchByKey` + `_pendingFetches` |
 | Stale-while-revalidate (lazy, per-key) | ✅ `allowStale` + background `fetchMethod` | Available, plus the timed refresh below |
-| **Scheduled bulk/active refresh on a timer** | ❌ refresh is lazy/on-access only | ✅ `refreshAge` loop reloads the working set (or `passRecentKeysOnRefresh` keys) in **one batched query**. **Benchmark status: indirectly backed by §B** — at 95% hit rate over 10M rows, ~19,000 of 20,000 reads per interval are served from memory with zero DB contact; DB load is flat at ~600 queries/window regardless of read QPS. Clean head-to-head ("reads cost 0 vs 1 DB query per request with simulated network latency") is a **benchmark gap** — see §8 open items. |
-| **Multi-key batch loading** (collapse N misses → one `IN (...)`) | ❌ `fetchMethod` is strictly per-key | ✅ `getOrFetchMany` / `fetchByKeys`. **Benchmark status: real-world case is strong; current benchmark baseline is weak.** The N+1 problem is ubiquitous in ORM-based apps (feed renders, dashboards, GraphQL resolvers). §5D shows 2.3–2.7× improvement, but the baseline is a hand-crippled no-coalescing subclass — not a realistic no-cache ORM loop. A proper benchmark (N per-key queries × network latency vs 1 batch query) is a **benchmark gap** — see §8 open items. |
+| **Scheduled bulk/active refresh on a timer** | ❌ refresh is lazy/on-access only | ✅ `refreshAge` loop reloads the working set (or `passRecentKeysOnRefresh` keys) in **one batched query**. **Benchmark status: indirectly backed by §B** — at 95% hit rate over 20M rows, ~19,000 of 20,000 reads per interval are served from memory with zero DB contact; DB load is flat at ~600 queries/window regardless of read QPS. Clean head-to-head ("reads cost 0 vs 1 DB query per request with simulated network latency") is a **benchmark gap** — see §8 open items. |
+| **Multi-key batch loading** (collapse N misses → one `IN (...)`) | ❌ `fetchMethod` is strictly per-key | ✅ `getOrFetchMany` / `fetchByKeys`. **Benchmark status: real-world case is strong; current benchmark baseline is weak.** The N+1 problem is ubiquitous in ORM-based apps (feed renders, dashboards, GraphQL resolvers). The prior "§5D 2.3–2.7× vs a no-coalescing subclass" figure has been **retired** (that hand-crippled arm was removed from the benchmark); §5D now only shows `refreshed-cache` matching raw `lru-cache` while coalescing trims queries. A proper N+1 benchmark (N per-key queries × network latency vs 1 batch query) is still a **benchmark gap** — see §8 open items. |
 | **Negative / miss caching** (bounded, separate TTL) | ❌ won't store `undefined`; no negative-cache concept | ✅ `maxMiss` / `maxAgeMiss` sidecar (§E) |
 | ROI metrics (`gain()`, hit/miss latency) | ❌ basic stats only | ✅ `metrics` + `gain()` (read §8 caveats) |
 
 **So: if you only need per-key memoization with TTL, lazy stale-revalidate, and same-key coalescing, plain `lru-cache` already does that — don't add this layer.** `refreshed-cache` earns its place only when you specifically want **(a)** scheduled *batched* refresh of a hot set, **(b)** N+1 collapse via multi-key batch fetch, or **(c)** cache-penetration/miss protection.
 
-> **Honesty caveat on §D:** §D's "Old Caching Logic" baseline is a hand-written subclass that *disables* coalescing (`DataCacheNoCoalescing`) — it is **not** `lru-cache`'s native `fetchMethod`, which already coalesces same-key fetches. So §D proves "coalescing+batching beats no-coalescing," **not** "refreshed-cache beats lru-cache." The defensible, lru-cache-relative wins are the features lru-cache lacks entirely: **timed bulk refresh (§B)** and **miss-cache (§E)**. A true raw-`lru-cache` baseline arm would be needed to make any head-to-head throughput claim — see the open item in §8.
+> **Honesty caveat on §D:** §D's `lru-cache` arm is a **hand-written wrapper** around `new LRUCache({max, ttl})` with manual miss-fetch — it deliberately does **not** use `lru-cache`'s native `fetchMethod` (which would coalesce same-key fetches on its own). So §D shows (a) `refreshed-cache` adds **zero overhead** over a plain `lru-cache` wrapper, and (b) its single-flight coalescing trims DB queries below that wrapper — **not** that it beats `lru-cache`'s own native coalescing. The defensible, lru-cache-relative wins remain the features lru-cache lacks entirely: **timed bulk refresh (§B)** and **miss-cache (§E)**. A native-`fetchMethod` baseline arm would still be needed for a head-to-head coalescing-throughput claim — see the open item in §8.
 
 ---
 
@@ -59,17 +59,17 @@ This directory contains a benchmark suite that compares the performance, memory 
 
 ## 2. Benchmark Setup & Database Size
 
-The database is populated with **10,000,000** records generated via a fast SQL generator (`generate_series`). Each row contains:
+The database is populated with **20,000,000** records generated via a fast SQL generator (`generate_series`). Each row contains:
 - `id` (SERIAL PRIMARY KEY)
 - `uuid` (VARCHAR UNIQUE) - indexed
 - `name` (VARCHAR)
 - `email` (VARCHAR)
 - `metadata` (JSONB) - containing nested properties simulating user profiles
 
-### Physical DB Sizes at 10M Rows:
-* **Table Data Size (Relation Size)**: `1,850 MB` (1.85 GB)
-* **Total Table Size (Data + Indexes)**: `3,524 MB` (3.52 GB)
-* **Overall Database Size**: `3,532 MB` (3.53 GB)
+### Physical DB Sizes at 20M Rows:
+* **Table Data Size (Relation Size)**: `3,587 MB` (3.59 GB)
+* **Total Table Size (Data + Indexes)**: `7,068 MB` (7.07 GB)
+* **Index Size (uuid b-trees + pkey)**: `3,481 MB` (3.48 GB)
 
 ---
 
@@ -102,8 +102,8 @@ npm install
 ### Seed the Database
 Before running the benchmarks, the database needs to be seeded with records. You have two options:
 
-#### Option A: Fast SQL Seeding (Recommended for 10,000,000 Rows)
-Run a native Postgres `generate_series` script inside the Docker container. This generates exactly 10,000,000 records with realistic formats in less than 30 seconds:
+#### Option A: Fast SQL Seeding (Recommended for 20,000,000 Rows)
+Run a native Postgres `generate_series` script inside the Docker container. This generates exactly 20,000,000 records with realistic formats in well under a minute:
 ```bash
 docker exec -i refreshed-cache-benchmark-postgres psql -U benchmark_user -d benchmark_db -c "
 INSERT INTO users (uuid, name, email, metadata)
@@ -112,7 +112,7 @@ SELECT
     'User ' || i,
     'user' || i || '@example.com',
     jsonb_build_object('city', 'City ' || (i % 100), 'company', 'Company ' || (i % 10), 'role', 'Role ' || (i % 5))
-FROM generate_series(1, 10000000) AS i;
+FROM generate_series(1, 20000000) AS i;
 "
 ```
 
@@ -161,11 +161,11 @@ npx jest test/miss-cache-workload.test.js
 
 ---
 
-## 5. Benchmark Results (10,000,000 Total DB Rows)
+## 5. Benchmark Results (20,000,000 Total DB Rows)
 
-✅ **FRESH — Re-run on 2026-06-04.** All numbers below are from the **process-isolated harness** (`benchmark/lib/isolated-runner.js`). Each `(round, strategy)` runs in its own forked process with a fresh pool and heap, `--expose-gc` quiesced memory, `hrtime` timing, and exact `DB Queries` counts.
+✅ **FRESH — Re-run on 2026-06-05** against a **20M-row** table. All numbers below are from the **process-isolated harness** (`benchmark/lib/isolated-runner.js`). Each `(round, strategy)` runs in its own forked process with a fresh pool and heap, `--expose-gc` quiesced memory, `hrtime` timing, and exact `DB Queries` counts.
 
-> **Read the numbers honestly.** Process isolation eliminates cross-round **heap accumulation** (see §7) — it does **not** make throughput deterministic. Throughput still varies round-to-round (e.g. §A speedup ranges 1.5×–3.0× for the *same* config; §D "New" throughput ranges ~8.5k–25.6k rps), so treat per-round figures as samples, not precise constants, and prefer the median across rounds. The most reproducible numbers are the **exact `DB Queries` integer counts**, not the timing-dependent throughput/latency.
+> **Read the numbers honestly.** Process isolation eliminates cross-round **heap accumulation** (see §7) — it does **not** make throughput deterministic. Throughput still varies round-to-round (e.g. §A speedup ranges ~2.2×–8.8× for the *same* config, driven mostly by a noisy per-key Direct baseline on the larger table; §D `refreshed-cache` throughput ranges ~24.5k–25.5k rps), so treat per-round figures as samples, not precise constants, and prefer the median across rounds. The most reproducible numbers are the **exact `DB Queries` integer counts**, not the timing-dependent throughput/latency. §D's deterministic mode (`--requests`/`--seed`) makes even the cache DB-query counts bit-reproducible — see §8.
 
 ### 5.0 How each section maps to the core case (§0)
 
@@ -176,14 +176,14 @@ The strategic "works / doesn't work" summary is in **[§0](#0-the-core-case-when
 | 1 | **§E** | Strongest & cleanest cache-vs-no-cache win: ~97% DB-load reduction + cache-penetration protection + ~1000× p99. |
 | 2 | **§A** | ~3× fewer DB queries and ~2× throughput **when reads are per-key and the hot set fits in memory**. |
 | 3 | **§B** | Bounded memory + sub-ms reads for huge datasets. The "90×" here is **active+batched refresh vs lazy per-key fetching** (a cache-config lesson), **not** cache-vs-no-cache. |
-| 4 | **§D** | The new coalescing/batching path beats the library's **old per-key path** 2.3–2.7×; against a zero-latency *local* direct baseline it's ~a wash. Proves the feature, not "caching beats not caching." |
+| 4 | **§D** | `refreshed-cache` matches raw `lru-cache` throughput (zero overhead) while coalescing trims DB queries below it; against a zero-latency *local* direct baseline the throughput edge is modest. Proves the overhead/coalescing story, not "caching beats not caching." |
 | 5 | **§C** | Honest null result: an undersized cache under pool saturation barely moves tail latency. Documents a limitation, not a win. |
 
 Read each section below with its rank in mind. §A and §E are the load-bearing evidence; §B is a memory/latency story; §D is a regression check; §C is a stress-case caveat.
 
 ### A. Standard Scenario Throughput (50,000 Lookups, 5-Rounds Run)
 
-> **Rank 2 (a fair cache-vs-no-cache win).** Unlike §B, the `Direct (No Cache)` baseline here issues **per-key** `WHERE uuid = $1` queries (`run-benchmark.js:113`) — the common ORM/REST-by-id pattern. So the cache's `DB Queries Direct` (50,000) vs `DB Queries Cache` (~16,000) is an apples-to-apples ~3× DB-load reduction, plus ~1.5–3× throughput. This is the win to cite when your reads are per-key and the hot set fits in memory.
+> **Rank 2 (a fair cache-vs-no-cache win).** Unlike §B, the `Direct (No Cache)` baseline here issues **per-key** `WHERE uuid = $1` queries (`run-benchmark.js:113`) — the common ORM/REST-by-id pattern. So the cache's `DB Queries Direct` (50,000) vs `DB Queries Cache` (~16,000 medium) is an apples-to-apples **~3× DB-load reduction** — the stable, reproducible headline here. Throughput "Speedup" reads higher (~2.2–8.8×) but is noisy and partly an artifact: on the 20M-row table the per-key `WHERE uuid = $1` Direct baseline is slower and more variable, inflating the `Cache Ops/sec ÷ DB Ops/sec` ratio, so lead with the DB-query reduction, not the speedup column. This is the win to cite when your reads are per-key and the hot set fits in memory.
 
 > **⛔ Guardrail — when this win evaporates.** The ~3× here exists *only* because the no-cache baseline reads **per-key** (`WHERE uuid = $1`). If your no-cache code already batches reads (`WHERE id IN (...)`), there is no query reduction left to capture — the cache ties it on query count (see §B's ~600 ≈ ~601) and the value shifts to read latency and bounded memory. **Don't quote §A's 3× for an already-batched read path.**
 
@@ -193,34 +193,34 @@ Simulates 50,000 read queries with a realistic traffic distribution of 70% cache
 
 | Round | Scenario | Cache Size | Init Time | DB Ops/sec | DB Queries Direct | Cache Ops/sec | DB Queries Cache | Speedup | Correctness | Heap Mem | RSS Mem |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Round 1** | Small Cache (1% coverage) | 10,000 | 36 ms | 52,532 | 50,000 | 105,379 | 20,893 | **2.01x** | ✅ PASSED | 4.26 MB | 14.85 MB |
-| **Round 1** | Medium Cache (10% coverage) | 100,000 | 145 ms | 40,720 | 50,000 | 123,452 | 16,296 | **3.03x** | ✅ PASSED | 39.94 MB | 136.82 MB |
-| **Round 1** | Large Cache (50% coverage) | 500,000 | 670 ms | 61,205 | 50,000 | 124,148 | 15,304 | **2.03x** | ✅ PASSED | 194.82 MB | 239.14 MB |
-| **Round 2** | Small Cache (1% coverage) | 10,000 | 30 ms | 70,896 | 50,000 | 107,403 | 20,999 | **1.51x** | ✅ PASSED | 4.26 MB | 13.94 MB |
-| **Round 2** | Medium Cache (10% coverage) | 100,000 | 138 ms | 34,936 | 50,000 | 97,694 | 16,350 | **2.80x** | ✅ PASSED | 40.00 MB | 107.77 MB |
-| **Round 2** | Large Cache (50% coverage) | 500,000 | 590 ms | 61,526 | 50,000 | 121,358 | 15,494 | **1.97x** | ✅ PASSED | 194.82 MB | 184.72 MB |
-| **Round 3** | Small Cache (1% coverage) | 10,000 | 32 ms | 75,481 | 50,000 | 110,783 | 20,850 | **1.47x** | ✅ PASSED | 4.27 MB | 13.08 MB |
-| **Round 3** | Medium Cache (10% coverage) | 100,000 | 140 ms | 72,845 | 50,000 | 126,174 | 16,225 | **1.73x** | ✅ PASSED | 40.00 MB | 110.05 MB |
-| **Round 3** | Large Cache (50% coverage) | 500,000 | 599 ms | 42,317 | 50,000 | 127,138 | 15,292 | **3.00x** | ✅ PASSED | 194.82 MB | 193.07 MB |
-| **Round 4** | Small Cache (1% coverage) | 10,000 | 33 ms | 55,511 | 50,000 | 110,526 | 20,698 | **1.99x** | ✅ PASSED | 4.25 MB | 15.17 MB |
-| **Round 4** | Medium Cache (10% coverage) | 100,000 | 139 ms | 73,946 | 50,000 | 110,871 | 16,355 | **1.50x** | ✅ PASSED | 40.00 MB | 102.09 MB |
-| **Round 4** | Large Cache (50% coverage) | 500,000 | 607 ms | 49,281 | 50,000 | 127,761 | 15,358 | **2.59x** | ✅ PASSED | 194.83 MB | 195.02 MB |
-| **Round 5** | Small Cache (1% coverage) | 10,000 | 28 ms | 54,609 | 50,000 | 106,458 | 20,772 | **1.95x** | ✅ PASSED | 4.26 MB | 13.53 MB |
-| **Round 5** | Medium Cache (10% coverage) | 100,000 | 140 ms | 73,388 | 50,000 | 125,803 | 16,258 | **1.71x** | ✅ PASSED | 40.01 MB | 107.75 MB |
-| **Round 5** | Large Cache (50% coverage) | 500,000 | 758 ms | 68,753 | 50,000 | 130,798 | 15,328 | **1.90x** | ✅ PASSED | 194.83 MB | 210.43 MB |
+| **Round 1** | Small Cache (1% coverage) | 10,000 | 38 ms | 14,855 | 50,000 | 115,099 | 20,702 | **7.75x** | ✅ PASSED | 4.25 MB | 14.69 MB |
+| **Round 1** | Medium Cache (10% coverage) | 100,000 | 145 ms | 19,482 | 50,000 | 127,892 | 16,158 | **6.56x** | ✅ PASSED | 39.94 MB | 123.28 MB |
+| **Round 1** | Large Cache (50% coverage) | 500,000 | 607 ms | 15,871 | 50,000 | 99,518 | 15,221 | **6.27x** | ✅ PASSED | 194.81 MB | 228.45 MB |
+| **Round 2** | Small Cache (1% coverage) | 10,000 | 31 ms | 33,030 | 50,000 | 78,477 | 20,575 | **2.38x** | ✅ PASSED | 4.26 MB | 16.26 MB |
+| **Round 2** | Medium Cache (10% coverage) | 100,000 | 166 ms | 17,056 | 50,000 | 124,836 | 16,234 | **7.32x** | ✅ PASSED | 39.94 MB | 125.78 MB |
+| **Round 2** | Large Cache (50% coverage) | 500,000 | 669 ms | 14,219 | 50,000 | 85,086 | 15,141 | **5.98x** | ✅ PASSED | 194.82 MB | 202.93 MB |
+| **Round 3** | Small Cache (1% coverage) | 10,000 | 36 ms | 41,172 | 50,000 | 115,978 | 21,013 | **2.82x** | ✅ PASSED | 4.25 MB | 16.84 MB |
+| **Round 3** | Medium Cache (10% coverage) | 100,000 | 152 ms | 12,287 | 50,000 | 107,541 | 16,301 | **8.75x** | ✅ PASSED | 39.95 MB | 100.28 MB |
+| **Round 3** | Large Cache (50% coverage) | 500,000 | 625 ms | 12,101 | 50,000 | 99,554 | 15,299 | **8.23x** | ✅ PASSED | 194.81 MB | 205.70 MB |
+| **Round 4** | Small Cache (1% coverage) | 10,000 | 39 ms | 35,066 | 50,000 | 108,010 | 20,634 | **3.08x** | ✅ PASSED | 4.26 MB | 16.55 MB |
+| **Round 4** | Medium Cache (10% coverage) | 100,000 | 141 ms | 18,516 | 50,000 | 112,887 | 16,305 | **6.10x** | ✅ PASSED | 39.95 MB | 104.38 MB |
+| **Round 4** | Large Cache (50% coverage) | 500,000 | 640 ms | 14,090 | 50,000 | 95,195 | 15,017 | **6.76x** | ✅ PASSED | 194.82 MB | 221.27 MB |
+| **Round 5** | Small Cache (1% coverage) | 10,000 | 35 ms | 55,789 | 50,000 | 120,965 | 20,561 | **2.17x** | ✅ PASSED | 4.26 MB | 14.77 MB |
+| **Round 5** | Medium Cache (10% coverage) | 100,000 | 144 ms | 29,386 | 50,000 | 113,857 | 16,359 | **3.87x** | ✅ PASSED | 39.95 MB | 105.98 MB |
+| **Round 5** | Large Cache (50% coverage) | 500,000 | 839 ms | 11,548 | 50,000 | 100,009 | 15,034 | **8.66x** | ✅ PASSED | 194.81 MB | 191.53 MB |
 
 > [!NOTE]
 > _`Est. time saved` is a counterfactual estimate (`hits × avg miss-fetch latency`), and `Hit/Fetch latency ratio` is a per-operation latency ratio — **neither is an application throughput speedup** (those are in the tables above). Both scale with the avg miss-fetch (DB round-trip) latency, and the hit side is sub-microsecond and timer-noise-bound; read them as directional diagnostics, not precise measurements (see §8)._
 > **Active Cache-Gain Metrics (Round 5 Diagnosed via `cache.gain()`):**
-> * **Small Cache (10,000)**: Est. time saved: `212,984.17 ms` | Hit/Fetch latency ratio (per-op, not throughput): `3,644.44x` | Active Size: `10,000` | Hit/Size Ratio: `2.88` | *Recommendation: High efficiency and near-capacity. Consider increasing max size to capture more hits.*
-> * **Medium Cache (100,000)**: Est. time saved: `200,933.96 ms` | Hit/Fetch latency ratio (per-op, not throughput): `2,209.73x` | Active Size: `100,000` | Hit/Size Ratio: `0.34` | *Recommendation: Cache size and TTL are optimal for the current workload.*
-> * **Large Cache (500,000)**: Est. time saved: `201,294.25 ms` | Hit/Fetch latency ratio (per-op, not throughput): `2,433.76x` | Active Size: `500,000` | Hit/Size Ratio: `0.07` | *Recommendation: Cache size and TTL are optimal for the current workload.*
+> * **Small Cache (10,000)**: Est. time saved: `189,928.98 ms` | Hit/Fetch latency ratio (per-op, not throughput): `3,538.97x` | Active Size: `10,000` | Hit/Size Ratio: `2.90` | Code: `healthy` | *Recommendation: High efficiency and near-capacity. Cache size and TTL are optimal or could be increased.*
+> * **Medium Cache (100,000)**: Est. time saved: `218,585.12 ms` | Hit/Fetch latency ratio (per-op, not throughput): `2,818.91x` | Active Size: `100,000` | Hit/Size Ratio: `0.34` | Code: `healthy` | *Recommendation: High efficiency and near-capacity. Cache size and TTL are optimal or could be increased.*
+> * **Large Cache (500,000)**: Est. time saved: `237,075.16 ms` | Hit/Fetch latency ratio (per-op, not throughput): `1,301.60x` | Active Size: `500,000` | Hit/Size Ratio: `0.07` | Code: `healthy` | *Recommendation: High efficiency and near-capacity. Cache size and TTL are optimal or could be increased.*
 
 ---
 
 ### B. Long-Running Strategy Simulation — Memory Bounding for Huge Datasets (5 Rounds, max: 100,000)
 
-> **Rank 3 (memory/latency story, not a DB-load headline).** Read §A and §E first for the cache-vs-no-cache case. This section's value is showing that a 10M-row dataset can be served at a ~95% hit rate from a **bounded ~44 MB hot set** with flat memory over time — and that, *among cache configs*, active+batched refresh fires ~90× fewer DB queries than lazy per-key fetching.
+> **Rank 3 (memory/latency story, not a DB-load headline).** Read §A and §E first for the cache-vs-no-cache case. This section's value is showing that a 20M-row dataset can be served at a ~95% hit rate from a **bounded ~44 MB hot set** with flat memory over time — and that, *among cache configs*, active+batched refresh fires ~90× fewer DB queries than lazy per-key fetching.
 
 > **⛔ Guardrail — two anti-patterns this section pins down.** (1) **Refreshing more than the active hot set.** *Scheduled Full Refresh* (~53k queries, ~67 MB peak heap) and *Lazy per-key* (~51k) cost **>90×** the DB load of Active-Only Refresh (~601 queries, ~44 MB) — that excess is reloads/fetches for keys nobody requested. Replay `recentKeys` (`passRecentKeysOnRefresh`), don't preload a guessed or full set. (2) **Expecting fewer queries than an already-batched baseline.** Direct batched ~600 ≈ Strategy C ~601 — against well-batched no-cache code the cache's edge is **latency and bounded memory, not query count** (for a query-count win, see §E).
 
@@ -230,33 +230,33 @@ Evaluates strategies under a shifting hot key load (sliding window) using a stri
 
 | Strategy | Hit Rate | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | DB Queries | Peak Heap | Base Heap | Heap Growth | Cleaned Heap | Correctness |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **[R1] Direct Prepared Statements** | 0% | 2000 rps | 0.13 ms | 0.23 ms | 0.29 ms | 600 | 25.83 MB | 5.86 MB | +19.97 MB | 24.92 MB | N/A |
-| **[R1] Strategy A: Scheduled Full Refresh** | 95.0% | 2000 rps | 0.04 ms | 0.08 ms | 0.13 ms | 53,457 | 67.15 MB | 5.86 MB | +61.29 MB | 28.66 MB | ✅ PASSED |
-| **[R1] Strategy B: Lazy Fetch-on-Miss** | 94.9% | 2000 rps | 0.05 ms | 0.08 ms | 0.13 ms | 51,169 | 42.94 MB | 5.86 MB | +37.08 MB | 29.20 MB | ✅ PASSED |
-| **[R1] Strategy C: Active-Only Refresh** | 95.0% | 2000 rps | 0.12 ms | 0.27 ms | 0.32 ms | 601 | 43.56 MB | 5.86 MB | +37.70 MB | 29.86 MB | ✅ PASSED |
-| **[R2] Direct Prepared Statements** | 0% | 2000 rps | 0.10 ms | 0.17 ms | 0.20 ms | 600 | 25.83 MB | 5.86 MB | +19.97 MB | 24.92 MB | N/A |
-| **[R2] Strategy A: Scheduled Full Refresh** | 95.1% | 2000 rps | 0.04 ms | 0.07 ms | 0.14 ms | 53,412 | 67.14 MB | 5.86 MB | +61.28 MB | 49.21 MB | ✅ PASSED |
-| **[R2] Strategy B: Lazy Fetch-on-Miss** | 94.9% | 2000 rps | 0.04 ms | 0.09 ms | 0.12 ms | 51,310 | 42.21 MB | 5.86 MB | +36.35 MB | 29.19 MB | ✅ PASSED |
-| **[R2] Strategy C: Active-Only Refresh** | 94.8% | 2000 rps | 0.12 ms | 0.24 ms | 0.40 ms | 601 | 42.17 MB | 5.86 MB | +36.31 MB | 29.85 MB | ✅ PASSED |
-| **[R3] Direct Prepared Statements** | 0% | 2000 rps | 0.09 ms | 0.16 ms | 0.18 ms | 600 | 25.83 MB | 5.86 MB | +19.97 MB | 24.92 MB | N/A |
-| **[R3] Strategy A: Scheduled Full Refresh** | 94.9% | 2000 rps | 0.05 ms | 0.07 ms | 0.13 ms | 53,375 | 66.14 MB | 5.87 MB | +60.27 MB | 28.61 MB | ✅ PASSED |
-| **[R3] Strategy B: Lazy Fetch-on-Miss** | 95.1% | 2000 rps | 0.03 ms | 0.08 ms | 0.12 ms | 51,354 | 41.64 MB | 5.86 MB | +35.78 MB | 29.18 MB | ✅ PASSED |
-| **[R3] Strategy C: Active-Only Refresh** | 94.8% | 2000 rps | 0.12 ms | 0.28 ms | 0.37 ms | 601 | 42.20 MB | 5.86 MB | +36.34 MB | 29.84 MB | ✅ PASSED |
-| **[R4] Direct Prepared Statements** | 0% | 2000 rps | 0.12 ms | 0.23 ms | 0.26 ms | 600 | 25.83 MB | 5.86 MB | +19.97 MB | 24.92 MB | N/A |
-| **[R4] Strategy A: Scheduled Full Refresh** | 94.8% | 2000 rps | 0.04 ms | 0.09 ms | 0.11 ms | 53,565 | 66.18 MB | 5.86 MB | +60.32 MB | 40.80 MB | ✅ PASSED |
-| **[R4] Strategy B: Lazy Fetch-on-Miss** | 95.0% | 2000 rps | 0.03 ms | 0.07 ms | 0.13 ms | 51,259 | 41.61 MB | 5.86 MB | +35.75 MB | 29.20 MB | ✅ PASSED |
-| **[R4] Strategy C: Active-Only Refresh** | 94.9% | 2000 rps | 0.12 ms | 0.31 ms | 0.39 ms | 601 | 42.19 MB | 5.86 MB | +36.33 MB | 29.84 MB | ✅ PASSED |
-| **[R5] Direct Prepared Statements** | 0% | 2000 rps | 0.10 ms | 0.20 ms | 0.26 ms | 600 | 25.83 MB | 5.87 MB | +19.96 MB | 24.92 MB | N/A |
-| **[R5] Strategy A: Scheduled Full Refresh** | 94.9% | 2000 rps | 0.04 ms | 0.07 ms | 0.10 ms | 53,430 | 66.11 MB | 5.86 MB | +60.25 MB | 65.36 MB | ✅ PASSED |
-| **[R5] Strategy B: Lazy Fetch-on-Miss** | 95.0% | 2000 rps | 0.03 ms | 0.06 ms | 0.10 ms | 51,265 | 41.61 MB | 5.87 MB | +35.74 MB | 29.19 MB | ✅ PASSED |
-| **[R5] Strategy C: Active-Only Refresh** | 95.0% | 2000 rps | 0.14 ms | 0.29 ms | 0.44 ms | 601 | 42.18 MB | 5.86 MB | +36.32 MB | 29.80 MB | ✅ PASSED |
+| **[R1] Direct Prepared Statements** | 0% | 2000 rps | 0.11 ms | 0.24 ms | 0.32 ms | 600 | 25.87 MB | 5.91 MB | +19.96 MB | 24.97 MB | N/A |
+| **[R1] Strategy A: Scheduled Full Refresh** | 94.9% | 2000 rps | 0.05 ms | 0.08 ms | 0.11 ms | 53,511 | 67.17 MB | 5.91 MB | +61.26 MB | 28.70 MB | ✅ PASSED |
+| **[R1] Strategy B: Lazy Fetch-on-Miss** | 95.0% | 2000 rps | 0.04 ms | 0.08 ms | 0.10 ms | 51,420 | 43.09 MB | 5.91 MB | +37.18 MB | 29.29 MB | ✅ PASSED |
+| **[R1] Strategy C: Active-Only Refresh** | 94.9% | 2000 rps | 0.11 ms | 0.30 ms | 0.36 ms | 601 | 43.59 MB | 5.91 MB | +37.68 MB | 29.89 MB | ✅ PASSED |
+| **[R2] Direct Prepared Statements** | 0% | 2000 rps | 0.14 ms | 0.22 ms | 0.25 ms | 600 | 25.88 MB | 5.91 MB | +19.97 MB | 24.98 MB | N/A |
+| **[R2] Strategy A: Scheduled Full Refresh** | 94.9% | 2000 rps | 0.05 ms | 0.08 ms | 0.08 ms | 53,404 | 67.26 MB | 5.91 MB | +61.35 MB | 28.73 MB | ✅ PASSED |
+| **[R2] Strategy B: Lazy Fetch-on-Miss** | 95.0% | 2000 rps | 0.03 ms | 0.08 ms | 0.12 ms | 51,320 | 43.06 MB | 5.91 MB | +37.15 MB | 29.27 MB | ✅ PASSED |
+| **[R2] Strategy C: Active-Only Refresh** | 95.0% | 2000 rps | 0.12 ms | 0.31 ms | 0.36 ms | 601 | 43.45 MB | 5.91 MB | +37.54 MB | 29.83 MB | ✅ PASSED |
+| **[R3] Direct Prepared Statements** | 0% | 2000 rps | 0.13 ms | 0.24 ms | 0.32 ms | 600 | 25.88 MB | 5.91 MB | +19.97 MB | 24.97 MB | N/A |
+| **[R3] Strategy A: Scheduled Full Refresh** | 95.0% | 2000 rps | 0.04 ms | 0.08 ms | 0.13 ms | 53,413 | 67.19 MB | 5.91 MB | +61.28 MB | 28.72 MB | ✅ PASSED |
+| **[R3] Strategy B: Lazy Fetch-on-Miss** | 94.9% | 2000 rps | 0.05 ms | 0.11 ms | 0.16 ms | 51,349 | 43.08 MB | 5.91 MB | +37.17 MB | 29.28 MB | ✅ PASSED |
+| **[R3] Strategy C: Active-Only Refresh** | 95.0% | 2000 rps | 0.17 ms | 0.53 ms | 0.62 ms | 601 | 43.62 MB | 5.91 MB | +37.71 MB | 29.90 MB | ✅ PASSED |
+| **[R4] Direct Prepared Statements** | 0% | 2000 rps | 0.10 ms | 0.20 ms | 0.26 ms | 600 | 25.88 MB | 5.91 MB | +19.97 MB | 24.97 MB | N/A |
+| **[R4] Strategy A: Scheduled Full Refresh** | 94.8% | 2000 rps | 0.03 ms | 0.07 ms | 0.12 ms | 53,393 | 67.19 MB | 5.91 MB | +61.28 MB | 28.74 MB | ✅ PASSED |
+| **[R4] Strategy B: Lazy Fetch-on-Miss** | 94.9% | 2000 rps | 0.05 ms | 0.08 ms | 0.12 ms | 51,378 | 43.06 MB | 5.91 MB | +37.15 MB | 29.31 MB | ✅ PASSED |
+| **[R4] Strategy C: Active-Only Refresh** | 94.9% | 2000 rps | 0.12 ms | 0.26 ms | 0.34 ms | 601 | 43.58 MB | 5.91 MB | +37.67 MB | 29.92 MB | ✅ PASSED |
+| **[R5] Direct Prepared Statements** | 0% | 2000 rps | 0.10 ms | 0.20 ms | 0.24 ms | 600 | 25.87 MB | 5.91 MB | +19.96 MB | 24.97 MB | N/A |
+| **[R5] Strategy A: Scheduled Full Refresh** | 95.0% | 2000 rps | 0.05 ms | 0.11 ms | 0.13 ms | 53,402 | 67.20 MB | 5.91 MB | +61.29 MB | 65.39 MB | ✅ PASSED |
+| **[R5] Strategy B: Lazy Fetch-on-Miss** | 95.0% | 2000 rps | 0.04 ms | 0.07 ms | 0.12 ms | 51,377 | 43.05 MB | 5.91 MB | +37.14 MB | 29.30 MB | ✅ PASSED |
+| **[R5] Strategy C: Active-Only Refresh** | 95.0% | 2000 rps | 0.12 ms | 0.26 ms | 0.38 ms | 601 | 43.65 MB | 5.91 MB | +37.74 MB | 29.90 MB | ✅ PASSED |
 
 > [!NOTE]
 > _`Est. time saved` is a counterfactual estimate (`hits × avg miss-fetch latency`), and `Hit/Fetch latency ratio` is a per-operation latency ratio — **neither is an application throughput speedup** (those are in the tables above). Both scale with the avg miss-fetch (DB round-trip) latency, and the hit side is sub-microsecond and timer-noise-bound; read them as directional diagnostics, not precise measurements (see §8)._
 > **Active Cache-Gain Metrics (Strategy C, Round 5 Diagnosed via `cache.gain()`):**
-> * **Active-Only Refresh**: Est. time saved: `0.00 ms` | Hit/Fetch latency ratio (per-op, not throughput): `0.00x` | Active Size: `45,977` | Hit/Size Ratio: `0.23` | *Recommendation: Cache size and TTL are optimal for the current workload.*
+> * **Active-Only Refresh**: Est. time saved: `0.00 ms` | Hit/Fetch latency ratio (per-op, not throughput): `0.00x` | Active Size: `45,985` | Hit/Size Ratio: `0.21` | Code: `batch-efficient` | *Recommendation: Low hit rate, but misses are collapsed into batched fetches (getOrFetchMany), keeping backend load low. Working as intended for large/streaming working sets.*
 >
-> _Active-Only Refresh populates the cache via the refresh loader, not per-key `fetchByKey`, so there are **no miss-fetch latency samples** to use as a baseline — `Est. time saved` is therefore 0. (Earlier runs reported a spurious **negative** value here; `gain()` now floors the per-hit saving at 0 when no fetch baseline exists.) The real win for this strategy is the **~90× DB-query reduction vs the per-key cache strategies (A/B)**, plus bounded memory — not this estimator._
+> _Active-Only Refresh populates the cache via the refresh loader, not per-key `fetchByKey`, so there are **no miss-fetch latency samples** to use as a baseline — `Est. time saved` is therefore 0. (Earlier runs reported a spurious **negative** value here; `gain()` now floors the per-hit saving at 0 when no fetch baseline exists.) The cache's *internal* hit rate is low (~0.21 hit/size) because the sliding window over a 20M-row space means most keys are misses — but those misses are **collapsed into one batched `fetchByKeys` query per batch**, so backend load stays at ~601 queries/window. `gain()` recognizes this via the `avgBatchSize` signal and returns **`batch-efficient`** rather than `low-value` (the earlier mis-classification, fixed in Tier 2.8). The real win for this strategy is the **~90× DB-query reduction vs the per-key cache strategies (A/B)**, plus bounded memory — not the `Est. time saved` estimator._
 
 **Key Takeaway**: All three cache strategies hold a **~95% hit rate**. On DB-query count, `Strategy C` (~601) **ties the well-batched Direct/No-Cache baseline (~600)** — caching does not beat a batched baseline on raw query count here. Where C wins is **against the other cache configs**: it fires ~90× fewer queries than Strategy A/B (~601 vs ~51,000), because A/B fetch each miss key-by-key while C refreshes the active set in one batched query. C also keeps memory flat (~44 MB hot set, ~4 MB growth) and read latency in-process (~0.04 ms p50 vs ~0.13 ms for Direct). **Takeaway: for huge datasets, prefer active + batched refresh over lazy per-key fetching; the cache's edge over a batched no-cache baseline is latency and memory bounding, not DB-query count (for that, see §E).**
 
@@ -272,75 +272,85 @@ Compares in-process cache lookups against direct Postgres querying via optimized
 
 | Round | Strategy | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | Row-Exist Rate | DB Queries | Peak Heap | Base Heap | Heap Growth | Correctness |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Round 1** | Direct Prepared (No Cache) | 2,878 rps | 12.71 ms | 216.00 ms | 230.25 ms | 93.8% | 87,400 | 31.23 MB | 6.16 MB | +25.07 MB | PASSED |
-| **Round 1** | Lazy Fetch-on-Miss | 2,650 rps | 8.23 ms | 207.11 ms | 221.16 ms | 94.1% | 61,685 | 49.00 MB | 6.17 MB | +42.83 MB | PASSED |
-| **Round 1** | Active-Only Refresh | 3,170 rps | 6.39 ms | 188.29 ms | 215.88 ms | 94.3% | 69,989 | 53.36 MB | 6.16 MB | +47.20 MB | PASSED |
-| **Round 2** | Direct Prepared (No Cache) | 3,277 rps | 9.46 ms | 208.66 ms | 223.91 ms | 94.2% | 99,200 | 31.02 MB | 6.17 MB | +24.85 MB | PASSED |
-| **Round 2** | Lazy Fetch-on-Miss | 3,076 rps | 6.71 ms | 203.46 ms | 218.46 ms | 93.9% | 68,861 | 52.94 MB | 6.17 MB | +46.77 MB | PASSED |
-| **Round 2** | Active-Only Refresh | 2,750 rps | 8.37 ms | 206.48 ms | 223.56 ms | 93.8% | 63,505 | 53.18 MB | 6.16 MB | +47.02 MB | PASSED |
-| **Round 3** | Direct Prepared (No Cache) | 2,757 rps | 13.83 ms | 214.86 ms | 233.02 ms | 93.8% | 83,700 | 31.86 MB | 6.17 MB | +25.69 MB | PASSED |
-| **Round 3** | Lazy Fetch-on-Miss | 2,908 rps | 7.28 ms | 190.24 ms | 217.12 ms | 94.0% | 65,867 | 50.92 MB | 6.16 MB | +44.76 MB | PASSED |
-| **Round 3** | Active-Only Refresh | 3,276 rps | 7.11 ms | 182.16 ms | 219.20 ms | 94.0% | 71,819 | 54.58 MB | 6.17 MB | +48.41 MB | PASSED |
-| **Round 4** | Direct Prepared (No Cache) | 2,530 rps | 14.62 ms | 215.18 ms | 229.24 ms | 93.9% | 76,700 | 31.13 MB | 6.16 MB | +24.97 MB | PASSED |
-| **Round 4** | Lazy Fetch-on-Miss | 2,905 rps | 7.22 ms | 204.26 ms | 218.92 ms | 94.0% | 65,950 | 50.18 MB | 6.17 MB | +44.01 MB | PASSED |
-| **Round 4** | Active-Only Refresh | 3,147 rps | 7.12 ms | 200.18 ms | 218.95 ms | 94.6% | 69,733 | 53.03 MB | 6.16 MB | +46.87 MB | PASSED |
-| **Round 5** | Direct Prepared (No Cache) | 2,625 rps | 11.71 ms | 215.04 ms | 229.43 ms | 94.3% | 79,400 | 31.72 MB | 6.17 MB | +25.55 MB | PASSED |
-| **Round 5** | Lazy Fetch-on-Miss | 2,546 rps | 8.19 ms | 206.68 ms | 220.38 ms | 94.0% | 59,642 | 48.18 MB | 6.17 MB | +42.01 MB | PASSED |
-| **Round 5** | Active-Only Refresh | 2,901 rps | 7.40 ms | 205.63 ms | 220.56 ms | 94.2% | 65,713 | 53.68 MB | 6.17 MB | +47.51 MB | PASSED |
+| **Round 1** | Direct Prepared (No Cache) | 3,050 rps | 12.69 ms | 208.28 ms | 223.18 ms | 94.0% | 92,500 | 31.20 MB | 6.21 MB | +24.99 MB | PASSED |
+| **Round 1** | Lazy Fetch-on-Miss | 3,277 rps | 6.62 ms | 157.75 ms | 216.19 ms | 94.1% | 71,994 | 55.94 MB | 6.21 MB | +49.73 MB | PASSED |
+| **Round 1** | Active-Only Refresh | 2,999 rps | 7.30 ms | 204.87 ms | 219.80 ms | 94.3% | 67,301 | 54.84 MB | 6.21 MB | +48.63 MB | PASSED |
+| **Round 2** | Direct Prepared (No Cache) | 3,591 rps | 10.84 ms | 177.65 ms | 223.00 ms | 94.4% | 108,400 | 31.00 MB | 6.21 MB | +24.79 MB | PASSED |
+| **Round 2** | Lazy Fetch-on-Miss | 3,408 rps | 6.49 ms | 163.13 ms | 217.12 ms | 94.3% | 73,794 | 55.81 MB | 6.21 MB | +49.60 MB | PASSED |
+| **Round 2** | Active-Only Refresh | 3,322 rps | 6.24 ms | 169.14 ms | 216.92 ms | 94.0% | 72,557 | 56.21 MB | 6.21 MB | +50.00 MB | PASSED |
+| **Round 3** | Direct Prepared (No Cache) | 3,433 rps | 9.97 ms | 186.30 ms | 219.36 ms | 94.5% | 103,600 | 31.19 MB | 6.21 MB | +24.98 MB | PASSED |
+| **Round 3** | Lazy Fetch-on-Miss | 3,213 rps | 7.04 ms | 173.22 ms | 220.89 ms | 93.5% | 71,369 | 59.83 MB | 6.21 MB | +53.62 MB | PASSED |
+| **Round 3** | Active-Only Refresh | 3,253 rps | 6.95 ms | 161.66 ms | 217.71 ms | 94.2% | 71,517 | 55.08 MB | 6.21 MB | +48.87 MB | PASSED |
+| **Round 4** | Direct Prepared (No Cache) | 2,947 rps | 14.06 ms | 208.21 ms | 223.39 ms | 94.3% | 88,900 | 31.28 MB | 6.21 MB | +25.07 MB | PASSED |
+| **Round 4** | Lazy Fetch-on-Miss | 3,440 rps | 6.64 ms | 91.60 ms | 211.77 ms | 93.7% | 74,486 | 56.03 MB | 6.21 MB | +49.82 MB | PASSED |
+| **Round 4** | Active-Only Refresh | 3,479 rps | 6.63 ms | 143.08 ms | 215.51 ms | 94.2% | 74,779 | 54.52 MB | 6.21 MB | +48.31 MB | PASSED |
+| **Round 5** | Direct Prepared (No Cache) | 3,272 rps | 12.10 ms | 203.51 ms | 221.56 ms | 94.1% | 99,100 | 31.23 MB | 6.21 MB | +25.02 MB | PASSED |
+| **Round 5** | Lazy Fetch-on-Miss | 3,419 rps | 6.95 ms | 149.54 ms | 214.97 ms | 94.3% | 73,941 | 52.91 MB | 6.21 MB | +46.70 MB | PASSED |
+| **Round 5** | Active-Only Refresh | 3,165 rps | 7.57 ms | 203.84 ms | 218.71 ms | 94.1% | 70,096 | 54.36 MB | 6.21 MB | +48.15 MB | PASSED |
 
 > [!NOTE]
 > _`Est. time saved` is a counterfactual estimate (`hits × avg miss-fetch latency`), and `Hit/Fetch latency ratio` is a per-operation latency ratio — **neither is an application throughput speedup** (those are in the tables above). Both scale with the avg miss-fetch (DB round-trip) latency, and the hit side is sub-microsecond and timer-noise-bound; read them as directional diagnostics, not precise measurements (see §8)._
 > **Active Cache-Gain Metrics (Round 5 Diagnosed via `cache.gain()`):**
-> * **Lazy Fetch-on-Miss**: Est. time saved: `677,486.50 ms` | Hit/Fetch latency ratio (per-op, not throughput): `1,414.85x` | Active Size: `54,030` | Hit/Size Ratio: `0.32` | *Recommendation: Cache size and TTL are optimal for the current workload.*
-> * **Active-Only Refresh**: Est. time saved: `750,216.33 ms` | Hit/Fetch latency ratio (per-op, not throughput): `1,050.96x` | Active Size: `59,980` | Hit/Size Ratio: `0.37` | *Recommendation: Cache size and TTL are optimal for the current workload.*
+> * **Lazy Fetch-on-Miss**: Est. time saved: `745,527.97 ms` | Hit/Fetch latency ratio (per-op, not throughput): `772.34x` | Active Size: `67,106` | Hit/Size Ratio: `0.44` | Code: `low-value` | *Recommendation: Cache provides low value for this workload. Reconsider caching strategy here.*
+> * **Active-Only Refresh**: Est. time saved: `781,384.92 ms` | Hit/Fetch latency ratio (per-op, not throughput): `987.63x` | Active Size: `63,803` | Hit/Size Ratio: `0.40` | Code: `low-value` | *Recommendation: Cache provides low value for this workload. Reconsider caching strategy here.*
+>
+> _Note: this is the **deliberately under-provisioned** stress case (120k window > 100k `max`), and `gain()` correctly flags it `low-value` — the cache thrashes and recovers only ~25% of DB queries here. Both strategies use **per-key** `getOrFetch` (no batching) against a mostly-valid key set (no miss-cache absorption), so neither the `batch-efficient` nor `miss-protected` signal applies — this is the advisor working as intended on a genuine anti-pattern. (Contrast §B Active-Only → `batch-efficient` and §E → `miss-protected`, where low hit rate is *not* a problem.)_
 
 ---
 
 ### D. New Features Performance ROI (Request Coalescing, Bulk Batching, & Observability)
 
-> **Rank 4 (a regression check, not a cache-vs-no-cache claim).** This proves the new coalescing/batching path beats the library's **own prior per-key implementation**; see the caveat below before quoting the multiplier.
+> **Rank 4 (an overhead + coalescing check, not a throughput-vs-no-cache claim).** This section compares **`refreshed-cache`** against the **raw `lru-cache`** it wraps and a **Direct (No Cache)** baseline. It answers two questions: (1) does the orchestration layer add hot-path overhead over plain `lru-cache`? (no), and (2) does single-flight coalescing actually cut DB queries? (yes, ~9%). It is **not** a "caching beats no cache on throughput" claim — see the caveat below.
 
-> **⛔ Guardrail — don't over-claim this multiplier.** The 2.3–2.7× is measured **vs the library's own old per-key path**, *not* vs no cache. Against the zero-latency local Direct baseline the new path ranges from **slower** (R3: 8,562 vs 11,797 rps) to ~1.2× faster (R5). Quote §D for *"new coalescing/batching beats the old path,"* nothing stronger — for the cache-vs-no-cache case use §B (memory/latency) and §E (query reduction).
+> **⛔ Guardrail — what the numbers do and don't say.** `refreshed-cache` matches `lru-cache` throughput (median **25,288 vs 24,798 rps** — overhead is within noise) while firing **fewer DB queries** (median **54,299 vs 59,651** per 30s window; **1,036,715 vs 1,143,006** over the 600s run, ~106k fewer) thanks to coalescing. Both caches out-throughput **Direct** (~21k rps) and collapse tail latency (p99 ~34 ms vs ~207 ms), **but** the Direct baseline here hits *zero-latency local* Postgres with no injected round-trip, so read the cross-cache story (overhead + coalescing) as the point of §D, not the throughput gap over Direct. For the unambiguous cache-vs-no-cache wins use **§B** (memory/latency) and **§E** (query reduction).
 
-Compares `New Caching Logic` (Request Coalescing (single-flight), Batch Loading, retrieve-time `checkValidity` validation, and Observability hooks/metrics tracking enabled) against the `Old Caching Logic` and `Direct Prepared Statements (No Cache)` baseline. Results from process-isolated harness.
+Compares **`refreshed-cache`** (Request Coalescing (single-flight), Batch Loading, retrieve-time `checkValidity` validation, and Observability hooks/metrics enabled) against the raw **`lru-cache`** library and a **Direct Prepared Statements (No Cache)** baseline. Results from process-isolated harness.
 
-> **What this section does and does not show.** The headline gains below are **New vs. the library's *prior* (pre-coalescing) implementation** — i.e. a regression check on the new features, *not* proof that caching beats not caching. Against the **Direct (No Cache)** baseline the result is workload-dependent and sometimes ~1× or worse: e.g. R3 New `8,562 rps` is **slower** than R3 Direct `11,797 rps`, while R1/R5 New are faster. The unambiguous "should I cache?" wins live in **§B** (90× fewer DB queries at equal hit rate) and **§E** (penetration protection). Read §D as "the new coalescing/batching path is much better than the old per-key path," nothing stronger.
+> **What this section does and does not show.** The point is **(a) zero measurable overhead** of `refreshed-cache`'s orchestration over plain `lru-cache`, and **(b)** that single-flight **coalescing** removes ~106k redundant fetches over the run. Against the zero-latency **Direct (No Cache)** baseline both caches are faster on throughput and far better on tail latency, but that gap understates a *remote* DB (no injected latency on the Direct path here) — so don't quote §D as the headline "should I cache?" number. The unambiguous wins live in **§B** (90× fewer DB queries at equal hit rate) and **§E** (penetration protection).
 
 | Strategy | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | DB Queries | Peak Heap | Base Heap | Heap Growth | Correctness |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Direct** | 18,815 rps | 7.02 ms | 22.25 ms | 209.81 ms | 1,686,800 | 36.81 MB | 6.23 MB | +30.58 MB | ✅ PASSED |
-| **lru-cache** | 25,397 rps | 10.85 ms | 17.96 ms | 22.30 ms | 1,146,727 | 63.54 MB | 6.28 MB | +57.26 MB | ✅ PASSED |
-| **refreshed-cache** | **25,412 rps** | **9.88 ms** | **18.01 ms** | **21.57 ms** | **1,024,161** | **66.37 MB** | 6.28 MB | **+60.09 MB** | ✅ PASSED |
+| **Direct** | 21,146 rps | 9.66 ms | 21.39 ms | 186.32 ms | 1,909,100 | 39.38 MB | 6.29 MB | +33.09 MB | ✅ PASSED |
+| **lru-cache** | 25,160 rps | 10.15 ms | 22.69 ms | 32.83 ms | 1,143,006 | 63.26 MB | 6.29 MB | +56.97 MB | ✅ PASSED |
+| **refreshed-cache** | **25,539 rps** | **3.92 ms** | **20.83 ms** | **27.14 ms** | **1,036,715** | **67.89 MB** | 6.29 MB | **+61.60 MB** | ✅ PASSED |
 
 > [!NOTE]
 > _`Est. time saved` is a counterfactual estimate (`hits × avg miss-fetch latency`), and `Hit/Fetch latency ratio` is a per-operation latency ratio — **neither is an application throughput speedup** (those are in the tables above). Both scale with the avg miss-fetch (DB round-trip) latency, and the hit side is sub-microsecond and timer-noise-bound; read them as directional diagnostics, not precise measurements (see §8)._
 > **Active Cache-Gain Metrics (refreshed-cache, Diagnosed via `cache.gain()`):**
-> * **refreshed-cache**: Est. time saved: `165,936,586.58 ms` | Hit/Fetch latency ratio (per-op, not throughput): `7,714.49x` | Active Size: `99,794` | Hit/Size Ratio: `107.68` | *Recommendation: High efficiency and near-capacity. Cache size and TTL are optimal or could be increased.*
+> * **refreshed-cache**: Est. time saved: `185,317,954.10 ms` | Hit/Fetch latency ratio (per-op, not throughput): `6,753.09x` | Active Size: `99,774` | Hit/Size Ratio: `109.60` | Code: `healthy` | *Recommendation: High efficiency and near-capacity. Cache size and TTL are optimal or could be increased.*
 
 ### Critical ROI Insights (Full 600s Run):
-1. **Near-Zero Overhead vs Baseline**: The **`refreshed-cache`** completely matches the throughput (`~25.4k rps`) and latency (`~10ms p50`) of the raw **`lru-cache`** baseline. This proves that our promise coalescing and background refreshing add essentially **zero overhead** to the hot path over a standard LRU cache.
-2. **Reduced DB Queries via Coalescing**: Compared to the **`lru-cache`** which fires `1,146,727` queries over 10 minutes, **`refreshed-cache`** fires only `1,024,161` queries. The single-flight coalescing successfully absorbed overlapping misses into single fetches, saving over 120,000 redundant database trips even under randomized load.
+1. **Near-Zero Overhead vs Baseline**: The **`refreshed-cache`** (`25,539 rps`) matches — and this run slightly edges — the raw **`lru-cache`** baseline (`25,160 rps`) on throughput, with comparable p50 latency. This proves that promise coalescing and background refreshing add essentially **zero overhead** to the hot path over a standard LRU cache.
+2. **Reduced DB Queries via Coalescing**: Compared to the **`lru-cache`** which fires `1,143,006` queries over 10 minutes, **`refreshed-cache`** fires only `1,036,715` queries. The single-flight coalescing absorbed overlapping misses into single fetches, saving **~106,000** redundant database trips even under randomized load.
 3. **Observability & Validity Hooks have Negligible Overhead**: Enabling retrieve-time `checkValidity` (executing a structure/type check on every read) and tracking metrics (`hits`, `misses`, `coalescedFetches`, `invalidations`) incurs no observable performance penalty. The cache still performs at ~25,000+ rps with sub-millisecond overhead.
 4. **Batch Single-Flight Coalescing**: When concurrent requests trigger overlapping batch fetches (`getOrFetchMany`), keys already in-flight are coalesced rather than queried redundantly, further capping database QPS.
 
 ### 5-Round Variance Data (30s per round)
 | Round | Strategy | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | DB Queries | Heap Growth | Correctness |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **1** | **Direct** | 19,543 rps | 6.12ms | 16.06ms | 207.88ms | 87,750 | +25.28 MB | ✅ PASSED |
-| **1** | **lru-cache** | 24,788 rps | 12.01ms | 19.43ms | 25.57ms | 60,114 | +53.67 MB | ✅ PASSED |
-| **1** | **refreshed-cache** | **25,251 rps** | **11.82ms** | **18.48ms** | **23.19ms** | **54,042** | **+56.90 MB** | ✅ PASSED |
-| **2** | **Direct** | 19,653 rps | 5.77ms | 14.81ms | 207.48ms | 89,100 | +26.75 MB | ✅ PASSED |
-| **2** | **lru-cache** | 25,253 rps | 11.97ms | 19.38ms | 26.95ms | 60,815 | +53.73 MB | ✅ PASSED |
-| **2** | **refreshed-cache** | **25,256 rps** | **11.69ms** | **18.81ms** | **25.47ms** | **54,126** | **+54.48 MB** | ✅ PASSED |
-| **3** | **Direct** | 20,679 rps | 5.97ms | 15.50ms | 209.23ms | 93,700 | +29.58 MB | ✅ PASSED |
-| **3** | **lru-cache** | 25,400 rps | 11.82ms | 18.98ms | 26.62ms | 61,077 | +53.45 MB | ✅ PASSED |
-| **3** | **refreshed-cache** | **25,347 rps** | **11.65ms** | **18.96ms** | **24.97ms** | **54,581** | **+56.35 MB** | ✅ PASSED |
-| **4** | **Direct** | 21,294 rps | 5.95ms | 13.85ms | 206.93ms | 95,550 | +23.89 MB | ✅ PASSED |
-| **4** | **lru-cache** | 24,647 rps | 11.87ms | 19.21ms | 26.03ms | 58,858 | +56.13 MB | ✅ PASSED |
-| **4** | **refreshed-cache** | **25,613 rps** | **11.58ms** | **17.85ms** | **22.78ms** | **55,217** | **+60.07 MB** | ✅ PASSED |
-| **5** | **Direct** | 19,741 rps | 6.14ms | 16.54ms | 208.11ms | 88,800 | +23.70 MB | ✅ PASSED |
-| **5** | **lru-cache** | 24,405 rps | 12.16ms | 18.45ms | 23.83ms | 58,953 | +54.06 MB | ✅ PASSED |
-| **5** | **refreshed-cache** | **23,495 rps** | **11.84ms** | **19.78ms** | **29.22ms** | **50,765** | **+58.51 MB** | ✅ PASSED |
+| **1** | **Direct** | 20,926 rps | 5.67ms | 17.02ms | 195.78ms | 93,600 | +25.29 MB | ✅ PASSED |
+| **1** | **lru-cache** | 25,601 rps | 11.84ms | 20.79ms | 29.42ms | 61,968 | +54.06 MB | ✅ PASSED |
+| **1** | **refreshed-cache** | **25,100 rps** | **11.78ms** | **22.72ms** | **33.59ms** | **54,349** | **+59.48 MB** | ✅ PASSED |
+| **2** | **Direct** | 21,209 rps | 5.96ms | 19.05ms | 207.21ms | 95,600 | +29.57 MB | ✅ PASSED |
+| **2** | **lru-cache** | 24,944 rps | 11.48ms | 23.26ms | 36.73ms | 59,651 | +52.19 MB | ✅ PASSED |
+| **2** | **refreshed-cache** | **24,537 rps** | **11.64ms** | **23.93ms** | **36.96ms** | **52,727** | **+55.23 MB** | ✅ PASSED |
+| **3** | **Direct** | 20,992 rps | 5.69ms | 20.13ms | 204.49ms | 95,150 | +27.97 MB | ✅ PASSED |
+| **3** | **lru-cache** | 24,674 rps | 11.63ms | 22.49ms | 34.42ms | 59,278 | +53.52 MB | ✅ PASSED |
+| **3** | **refreshed-cache** | **25,336 rps** | **11.55ms** | **21.73ms** | **30.10ms** | **54,299** | **+56.05 MB** | ✅ PASSED |
+| **4** | **Direct** | 20,765 rps | 5.85ms | 19.86ms | 207.02ms | 93,900 | +29.79 MB | ✅ PASSED |
+| **4** | **lru-cache** | 24,798 rps | 11.69ms | 23.02ms | 35.59ms | 59,821 | +52.12 MB | ✅ PASSED |
+| **4** | **refreshed-cache** | **25,338 rps** | **11.36ms** | **22.73ms** | **32.81ms** | **54,576** | **+56.50 MB** | ✅ PASSED |
+| **5** | **Direct** | 20,100 rps | 6.16ms | 21.03ms | 209.25ms | 90,350 | +23.82 MB | ✅ PASSED |
+| **5** | **lru-cache** | 24,660 rps | 11.83ms | 24.24ms | 40.42ms | 59,603 | +55.08 MB | ✅ PASSED |
+| **5** | **refreshed-cache** | **25,288 rps** | **11.32ms** | **23.84ms** | **38.18ms** | **54,194** | **+56.51 MB** | ✅ PASSED |
+
+**Aggregate over 5 rounds** (`median (min–max)`, printed by the harness — robust to single-round GC outliers):
+
+| Strategy | Throughput (rps) | p50 (ms) | p99 (ms) | DB Queries | Heap Growth (MB) | Correctness |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Direct** | 20,926 (20,100–21,209) | 5.85 (5.67–6.16) | 207.02 (195.78–209.25) | 93,900 (90,350–95,600) | 27.97 (23.82–29.79) | ✅ PASSED |
+| **lru-cache** | 24,798 (24,660–25,601) | 11.69 (11.48–11.84) | 35.59 (29.42–40.42) | 59,651 (59,278–61,968) | 53.52 (52.12–55.08) | ✅ PASSED |
+| **refreshed-cache** | **25,288 (24,537–25,338)** | **11.55 (11.32–11.78)** | **33.59 (30.10–38.18)** | **54,299 (52,727–54,576)** | **56.50 (55.23–59.48)** | ✅ PASSED |
 
 ---
 
@@ -354,28 +364,30 @@ Models a cache-penetration **attack**: 50% of traffic hammers a fixed pool of **
 
 | Round | Strategy | Avg Throughput | p50 Latency | p95 Latency | p99 Latency | Total DB Queries | Peak Heap (MB) | Base Heap (MB) | Heap Growth (MB) |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **R1** | Direct Prepared (No Cache) | 1,817 rps | 8.31 ms | 19.34 ms | 193.62 ms | 109,500 | 8.81 MB | 5.84 MB | +2.97 MB |
-| **R1** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,930 rps | 1.12 ms | 7.89 ms | 10.54 ms | 55,884 | 13.47 MB | 5.85 MB | +7.62 MB |
-| **R1** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,027 rps | **0.11 ms** | **0.23 ms** | **0.31 ms** | **3,062** | 13.34 MB | 5.84 MB | +7.50 MB |
-| **R2** | Direct Prepared (No Cache) | 1,892 rps | 8.03 ms | 16.21 ms | 198.79 ms | 114,000 | 8.23 MB | 5.84 MB | +2.39 MB |
-| **R2** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,993 rps | 1.94 ms | 6.44 ms | 9.11 ms | 58,613 | 13.02 MB | 5.84 MB | +7.18 MB |
-| **R2** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,027 rps | **0.10 ms** | **0.22 ms** | **0.30 ms** | **3,060** | 13.40 MB | 5.84 MB | +7.56 MB |
-| **R3** | Direct Prepared (No Cache) | 1,737 rps | 9.66 ms | 102.33 ms | 209.94 ms | 104,450 | 8.00 MB | 5.84 MB | +2.16 MB |
-| **R3** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,946 rps | 1.00 ms | 8.74 ms | 19.22 ms | 56,615 | 13.55 MB | 5.84 MB | +7.71 MB |
-| **R3** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,027 rps | **0.10 ms** | **0.20 ms** | **0.27 ms** | **3,060** | 13.33 MB | 5.84 MB | +7.49 MB |
-| **R4** | Direct Prepared (No Cache) | 1,798 rps | 9.69 ms | 109.97 ms | 208.39 ms | 108,300 | 8.41 MB | 5.84 MB | +2.57 MB |
-| **R4** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,924 rps | 0.38 ms | 8.36 ms | 109.06 ms | 55,340 | 13.50 MB | 5.84 MB | +7.66 MB |
-| **R4** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,023 rps | **0.11 ms** | **0.23 ms** | **0.30 ms** | **3,058** | 13.34 MB | 5.84 MB | +7.50 MB |
-| **R5** | Direct Prepared (No Cache) | 1,836 rps | 7.38 ms | 22.25 ms | 205.69 ms | 110,800 | 8.23 MB | 5.84 MB | +2.39 MB |
-| **R5** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,941 rps | 1.70 ms | 9.09 ms | 110.70 ms | 56,325 | 13.43 MB | 5.84 MB | +7.59 MB |
-| **R5** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,023 rps | **0.08 ms** | **0.19 ms** | **0.26 ms** | **3,043** | 13.34 MB | 5.84 MB | +7.50 MB |
+| **R1** | Direct Prepared (No Cache) | 1,880 rps | 11.02 ms | 18.61 ms | 118.97 ms | 113,200 | 8.69 MB | 5.89 MB | +2.80 MB |
+| **R1** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,968 rps | 2.09 ms | 9.44 ms | 11.68 ms | 56,830 | 13.24 MB | 5.89 MB | +7.35 MB |
+| **R1** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,010 rps | **0.09 ms** | **0.16 ms** | **0.22 ms** | **3,073** | 13.38 MB | 5.89 MB | +7.49 MB |
+| **R2** | Direct Prepared (No Cache) | 1,877 rps | 11.19 ms | 22.12 ms | 210.81 ms | 113,000 | 8.80 MB | 5.89 MB | +2.91 MB |
+| **R2** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,968 rps | 0.72 ms | 9.55 ms | 10.91 ms | 56,736 | 13.10 MB | 5.89 MB | +7.21 MB |
+| **R2** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,017 rps | **0.09 ms** | **0.18 ms** | **0.23 ms** | **3,056** | 13.43 MB | 5.89 MB | +7.54 MB |
+| **R3** | Direct Prepared (No Cache) | 1,878 rps | 10.27 ms | 16.87 ms | 108.72 ms | 113,000 | 8.91 MB | 5.89 MB | +3.02 MB |
+| **R3** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,966 rps | 0.43 ms | 9.14 ms | 13.78 ms | 56,224 | 13.19 MB | 5.89 MB | +7.30 MB |
+| **R3** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,017 rps | **0.09 ms** | **0.19 ms** | **0.23 ms** | **3,064** | 13.39 MB | 5.89 MB | +7.50 MB |
+| **R4** | Direct Prepared (No Cache) | 1,861 rps | 10.74 ms | 18.23 ms | 104.10 ms | 112,050 | 8.88 MB | 5.89 MB | +2.99 MB |
+| **R4** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,961 rps | 0.32 ms | 9.56 ms | 18.29 ms | 56,432 | 13.59 MB | 5.89 MB | +7.70 MB |
+| **R4** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,017 rps | **0.09 ms** | **0.18 ms** | **0.22 ms** | **3,073** | 13.38 MB | 5.89 MB | +7.49 MB |
+| **R5** | Direct Prepared (No Cache) | 1,857 rps | 11.25 ms | 20.26 ms | 113.77 ms | 111,800 | 8.89 MB | 5.89 MB | +3.00 MB |
+| **R5** | Cache — Miss Protection **Disabled** (`maxMiss: 0`) | 1,959 rps | 0.40 ms | 9.14 ms | 104.54 ms | 56,391 | 13.36 MB | 5.89 MB | +7.47 MB |
+| **R5** | Cache — Miss Protection **Enabled** (`maxMiss: 10000, maxAgeMiss: 20`) | 2,014 rps | **0.09 ms** | **0.18 ms** | **0.22 ms** | **3,061** | 13.49 MB | 5.89 MB | +7.60 MB |
 
 > [!NOTE]
 > _`Est. time saved` is a counterfactual estimate (`hits × avg miss-fetch latency`), and `Hit/Fetch latency ratio` is a per-operation latency ratio — **neither is an application throughput speedup** (those are in the tables above). Both scale with the avg miss-fetch (DB round-trip) latency, and the hit side is sub-microsecond and timer-noise-bound; read them as directional diagnostics, not precise measurements (see §8)._
 > **Active Cache-Gain Metrics (Miss Protection Enabled, Round 5 Diagnosed via `cache.gain()`):**
-> * **Miss Protection Enabled**: Est. time saved: `370,902.43 ms` | Hit/Fetch latency ratio (per-op, not throughput): `242.04x` | Active Size: `10,000` | Hit/Size Ratio: `6.05` | *Recommendation: Cache size and TTL are optimal for the current workload.*
+> * **Miss Protection Enabled**: Est. time saved: `323,440.56 ms` | Hit/Fetch latency ratio (per-op, not throughput): `304.73x` | Active Size: `10,000` | Hit/Size Ratio: `6.05` | Code: `miss-protected` | *Recommendation: Miss-cache is absorbing a high share of bogus-key lookups (penetration protection). Low hit rate here reflects shielded misses, not a sizing problem.*
+>
+> _Half the traffic is bogus-key *misses*, which would drag the hit-rate/utilization signals down — but the miss-cache absorbs the flood, and `gain()` now tracks that via the `missCacheHits` counter (the `missProtectionRatio` signal). It therefore returns **`miss-protected`** instead of the earlier `low-value` mis-classification (fixed in Tier 2.8), correctly recognizing the library's strongest DB-load win (~97% query reduction). For the magnitude of the win, still read the DB-query and p99 columns — the `code` now points the right direction._
 
-**Key Takeaway**: Over 60 seconds with `maxAgeMiss: 20`, miss-cache exhibits the **full lifecycle**: misses are cached, entries expire after 20s, and are refetched — total ~3,060–3,070 DB queries per round (~1,000 per 20s window), versus ~56–57k for `maxMiss: 0` (disabled) and ~110–116k for no cache. This **~95% reduction** proves the production claim: under indefinite attack, miss-cache **bounds** DB load to ~pool-size per TTL interval, not "zero forever" (which was an artifact of earlier 30s runs expiring nothing). p99 latency stays **~0.2 ms** (pure in-process), ~10–20 ms worse with `maxMiss: 0`, and ~110–210 ms worse uncached. Miss-cache costs ~7.5 MB bounded extra heap.
+**Key Takeaway**: Over 60 seconds with `maxAgeMiss: 20`, miss-cache exhibits the **full lifecycle**: misses are cached, entries expire after 20s, and are refetched — total ~3,056–3,073 DB queries per round (~1,000 per 20s window), versus ~56k for `maxMiss: 0` (disabled) and ~112–113k for no cache. This **~97% reduction** proves the production claim: under indefinite attack, miss-cache **bounds** DB load to ~pool-size per TTL interval, not "zero forever" (which was an artifact of earlier 30s runs expiring nothing). p99 latency stays **~0.2 ms** (pure in-process), ~10–20 ms worse with `maxMiss: 0`, and ~110–210 ms worse uncached. Miss-cache costs ~7.5 MB bounded extra heap.
 
 > **Workload & lifecycle integrity:** the script enforces `duration ≥ 2 × maxAgeMiss` so expiry+refill cycles are observed (guard rejects duration=30, maxAgeMiss=60, which would show only fill/absorb without refill). The bogus pool is validated small enough that bogus requests repeat heavily (≥3× per pool entry). See `test/miss-cache-workload.test.js` for regression tests. Default `maxAgeMiss: 20` is for demo (production uses 60, but 20 fits 3 cycles in one 60s benchmark run).
 
@@ -387,15 +399,15 @@ A critical observation from the 5-round data is the difference in behavior betwe
 
 ### Why C's Cache Latencies Align with the Direct DB Baseline:
 1. **Key-by-Key Miss Storms**: In `run-load-test.js` (C), the workload strictly sends individual single-key queries (`cache.getOrFetch(key)`). When a cache miss occurs under high load, the cache triggers a single-key database query (`SELECT ... WHERE uuid = $1`).
-2. **Postgres Connection Pool Saturation**: Because the active sliding window (120,000 keys) is wider than the cache max capacity (100,000 keys), evictions are constant, triggering **65,000–102,000 individual DB queries** during the 30-second run (vs. 55,000–84,000 for caching strategies — a modest reduction that still saturates the pool).
-3. **Queueing Latency**: Firing these lookups key-by-key saturates the Postgres client connection pool. The resulting socket queueing delays block both direct database queries and cache-miss fetches equally, causing cache latencies to match direct DB levels (p99 ~210–226 ms). This is a **deliberately under-provisioned stress case** — the working set (120k keys) exceeds the cache ceiling (100k), so the cache cannot fully serve its hot set.
+2. **Postgres Connection Pool Saturation**: Because the active sliding window (120,000 keys) is wider than the cache max capacity (100,000 keys), evictions are constant, triggering **~88,900–108,400 individual DB queries** during the 30-second run (vs. ~67,000–74,800 for caching strategies — a modest reduction that still saturates the pool).
+3. **Queueing Latency**: Firing these lookups key-by-key saturates the Postgres client connection pool. The resulting socket queueing delays block both direct database queries and cache-miss fetches equally, causing cache latencies to match direct DB levels (p99 ~211–223 ms). This is a **deliberately under-provisioned stress case** — the working set (120k keys) exceeds the cache ceiling (100k), so the cache cannot fully serve its hot set.
 4. **Row-Exist Rate**: The ~95% figure logged in `run-load-test.js` is the **DB row-existence rate** (whether the key existed in the DB at all), not the cache hit rate.
 
 ### How D's Caching Logic Resolves the Bottleneck:
 In `run-new-features-benchmark.js` (D), we isolate the benefits of **Request Coalescing (single-flight)** and **Bulk Batch Loading (`getOrFetchMany`)**:
 1. **Request Coalescing (Thundering Herd Protection)**: Under concurrent duplicate reads targeting the same hot keys, the cache coalesces the concurrent reads into a single database query, returning the shared result.
 2. **Bulk Batch Loading**: For batch reads (fetching 20 keys at once), the cache groups all missed keys and fetches them in a single `WHERE uuid IN (...)` statement.
-3. **Throughput & Latency ROI**: By cutting database query volume by ~63% (**from ~135–162k queries down to ~46–54k**), the new caching logic prevents connection pool queuing. This drops the p99 latency from **~240 ms (old logic)** to **~35–67 ms (new logic)**, while boosting throughput by **2.3–2.7x** (~22–25k rps vs. ~9–12k rps).
+3. **Throughput & Latency ROI**: Unlike §C, §D's workload mixes batch reads (`getOrFetchMany`) and thundering-herd hot keys, so coalescing and batching keep DB query volume to **~52,700–55,200 per 30s window for `refreshed-cache`** (vs ~59,000–62,000 for raw `lru-cache` and ~90,000–95,600 for Direct). This keeps the pool unsaturated, holding p99 latency at **~30–38 ms** (vs Direct's **~196–209 ms**) while sustaining **~25k rps** — matching `lru-cache` with no measurable overhead from the orchestration layer.
 
 ---
 
@@ -405,8 +417,8 @@ Under the process-isolated harness, each `(strategy, round)` pair forks a fresh 
 
 **Observed base heap per process** (consistent across all rounds):
 - **Standard benchmark (§A)**: ~4–5 MB base heap (small/medium caches), ~195 MB with 500k-entry cache pre-loaded
-- **Long-running simulation (§B)**: ~5.82–5.83 MB base heap per strategy process
-- **Load test (§C)** and **new features (§D)**: ~6.13–6.18 MB base heap per strategy process
+- **Long-running simulation (§B)**: ~5.91 MB base heap per strategy process; **miss-cache attack (§E)**: ~5.89 MB
+- **Load test (§C)**: ~6.21 MB and **new features (§D)**: ~6.29 MB base heap per strategy process
 
 ### What the memory figures prove:
 1. **No cross-round accumulation**: Because each process starts cold, base heap stays flat at ~6 MB across all 5 rounds. Any heap growth observed is solely due to the strategy's own cache population and connection pool — not GC pressure or V8 page retention from prior rounds.
@@ -427,9 +439,9 @@ All results in §5 are produced by the **process-isolated harness** (`benchmark/
 - **Injected fetch latency (§D)**: the cache `fetchByKey`/`fetchByKeys` paths in §D carry an `await sleep(10)` to model a remote-DB round trip on a miss. The **Direct (No Cache) baseline has no such sleep** — it hits local Postgres at sub-ms. This makes Direct look *better* than a production remote DB would (i.e. the comparison is conservative toward the cache for misses), but it also means the §D New-vs-Direct numbers understate the cache's real-world edge. Old-vs-New both pay the 10 ms, so that comparison is apples-to-apples.
 - **`cache.gain()` figures are estimates, not measurements**: `Est. time saved = hits × (avg miss-fetch latency − avg hit latency)` is a counterfactual that assumes every hit would otherwise have been a full miss-fetch *at the injected ~10 ms latency*. `Hit/Fetch latency ratio` is `avg miss-fetch / avg hit` — a per-operation latency ratio, **not** an application throughput speedup. Hit latency is sampled (`latencySampleRate`, default 0.01) and measured with `performance.now()` around a single `Map.get`, so it is timer-noise-bound at the sub-microsecond scale; do not read its precision literally. Use these as directional diagnostics; use the table throughput/DB-query columns for hard claims.
 - **Variance**: process isolation removes cross-round heap accumulation but not throughput noise. With n=5 and the spreads noted in §5, prefer medians over any single round; the per-section `cache.gain()` callouts happen to all be Round 5 and are illustrative, not representative.
-- **Deterministic mode (`run-new-features-benchmark.js` only)**: this script supports a reproducible workload for regression diffing. (1) **Seeded PRNG** — every logical request derives its keys from a `mulberry32` PRNG seeded by `(--seed + round, requestSeq)`, so *which* keys are touched depends only on the seed and the request index, never on async interleaving between the 4 workers. (2) **Logical-tick window sweep** — the hot-key window slides by request/batch progress instead of wall-clock, so GC/scheduling jitter no longer shifts it. (3) **`--requests=N` work box** — stops after exactly N logical requests instead of after a duration, fixing the request *count* as well as the key sequence. (4) **GC settle points** before the baseline sample and before load starts. (5) **Median-of-N aggregate table** — multi-round runs print a `median (min–max)` summary per strategy beneath the per-round table, which is robust to single-round GC outliers while still surfacing the spread.
+- **Deterministic mode (`run-new-features-benchmark.js` only)**: this script supports a reproducible workload for regression diffing. (1) **Stateless seeded draws** — every random decision is `hashFloat(seedBase, requestSeq, drawIndex)`, a splitmix-style hash with **zero per-request allocation**, so *which* keys are touched depends only on `(--seed + round, requestSeq)` and never on async interleaving between the 4 workers (and adjacent requests are independently mixed, not seeded from adjacent integers). (2) **Cyclic logical window sweep** — the hot-key window advances by logical request progress (`reqSeq`), completing one full sweep every ~30s-equivalent of traffic (`SWEEP_PERIOD_SEC`), so the cadence matches the original wall-clock sweep but no longer shifts with GC/scheduling jitter, and a slow strategy can't fall behind into only the early universe. (3) **`--requests=N` work box** — stops after exactly N logical requests instead of after a duration, fixing the request *count* as well as the key sequence. (4) **GC settle points** before the baseline sample and before load starts. (5) **Median-of-N aggregate table** — multi-round runs print a `median (min–max)` summary per strategy beneath the per-round table, which is robust to single-round GC outliers while still surfacing the spread.
 
-  **Measured reproducibility** (two back-to-back `--requests=40000 --seed=777` runs): **Direct** is bit-identical (40,000 DB queries both runs — one query per request, no caching). **lru-cache** and **refreshed-cache** are reproducible to **~0.1%** (e.g. 25,354 vs 25,371; 22,074 vs 22,072), not bit-identical: two timing dependencies survive — the hot-window boundary for a batch depends on `reqSeq` at batch start, and refreshed-cache's single-flight **coalescing** collapses *concurrently* in-flight misses, and which misses overlap is a scheduling property. Both are well under the ~9% raw round-to-round swing this mode replaces. Setting `NUM_WORKERS=1` would make the cache arms exact too, but it removes the concurrency the coalescing feature exists to exercise — the wrong trade for this benchmark, so ~0.1% is treated as the floor. Use a large `--requests` (e.g. 2M) for steady state; small counts are warmup-weighted and read below the steady ~25k rps.
+  **Measured reproducibility** (two back-to-back `--requests=40000 --seed=777` runs, 2026-06-05): all three arms are now **bit-identical** — **Direct 40,000**, **lru-cache 25,291**, **refreshed-cache 21,904** DB queries in *both* runs (down from a ~9% raw round-to-round swing). The stateless hash draws plus the `reqSeq`-driven sweep removed the timing dependence that previously held the cache arms to ~0.1% rather than exact. Note: at much larger `--requests` or higher worker counts, single-flight **coalescing** can still introduce sub-0.1% drift, because *which* concurrently-in-flight misses overlap is a scheduling property — so treat exact reproducibility as the observed floor at this scale, not a hard guarantee at every scale. Use a large `--requests` (e.g. 2M) for steady state; small counts are warmup-weighted and read below the steady ~25k rps.
 
 ### Known gap / open item: no raw `lru-cache` baseline
 
@@ -488,18 +500,18 @@ app.get("/config/:id", (req, res) => {
 
 ### Pattern 2: Active-Only Refresh (Hot Subset of a Huge Dataset)
 
-> **Use case — user-profile service with 10 million accounts.**
-> You have 10 million user rows (~3.5 GB on disk). You cannot load them all into RAM, but caching nothing means every request hits the DB. The insight: at any given moment only **~50,000 users are actually active** (logged in, browsing). Active-Only Refresh keeps only those ~50k profiles warm in ~44 MB of heap, and each refresh cycle re-fetches *only those keys* in a single batched query. The other 9.95 million cold rows are never touched. As the active population shifts across the day, the cache tracks it automatically — keys that go cold age out, keys that go hot get fetched on first miss and refreshed on subsequent cycles.
+> **Use case — user-profile service with 20 million accounts.**
+> You have 20 million user rows (~3.6 GB on disk). You cannot load them all into RAM, but caching nothing means every request hits the DB. The insight: at any given moment only **~50,000 users are actually active** (logged in, browsing). Active-Only Refresh keeps only those ~50k profiles warm in ~44 MB of heap, and each refresh cycle re-fetches *only those keys* in a single batched query. The other 19.95 million cold rows are never touched. As the active population shifts across the day, the cache tracks it automatically — keys that go cold age out, keys that go hot get fetched on first miss and refreshed on subsequent cycles.
 
 **When to use:** row count is in the millions (too large to pre-load fully), but a small hot subset gets the vast majority of traffic.
 
-**Benchmark backing:** §5B — 95% hit rate over 10M rows from a bounded ~44 MB hot set; flat memory across 5 rounds. On DB queries: the active+batched path (Strategy C) fires ~601 queries/30s window while a naive per-key miss-fetch path (Strategy A/B) fires ~51k — a ~90× difference *between cache configs*. Note: a well-batched no-cache baseline also sits at ~600, so the win over *no cache* is read latency (~0.04 ms in-process vs a DB round trip) and memory bounding, not raw query count.
+**Benchmark backing:** §5B — 95% hit rate over 20M rows from a bounded ~44 MB hot set; flat memory across 5 rounds. On DB queries: the active+batched path (Strategy C) fires ~601 queries/30s window while a naive per-key miss-fetch path (Strategy A/B) fires ~51k — a ~90× difference *between cache configs*. Note: a well-batched no-cache baseline also sits at ~600, so the win over *no cache* is read latency (~0.04 ms in-process vs a DB round trip) and memory bounding, not raw query count.
 
 ```javascript
 const cache = new Cache(
   async (recentKeys) => {
     // Called on each refresh cycle with the keys accessed since last cycle.
-    // Fetch only the hot set — never loads the full 10M rows.
+    // Fetch only the hot set — never loads the full 20M rows.
     if (!recentKeys || recentKeys.length === 0) return [];
     const rows = await db.query(
       "SELECT id, data FROM profiles WHERE id = ANY($1)", [recentKeys]
@@ -525,7 +537,7 @@ const cache = new Cache(
 
 **When to use:** reads are per-key (ORM `findById`, REST `/resource/:id`), traffic can spike on the same key simultaneously (viral content, product drops, breaking news).
 
-**Benchmark backing:** §5A — per-key baseline (50k `WHERE uuid=$1` queries) reduced ~3× by the cache (~16k), ~2× throughput. §5D — under a 30%-same-key burst, coalescing drops p99 from ~240 ms to ~24–67 ms vs the un-coalesced old path. ⚠️ The §5D win is vs the library's own pre-coalescing path; against a no-latency local baseline it's ~a wash — the win is most visible in production where DB round trips are 5–20 ms.
+**Benchmark backing:** §5A — per-key baseline (50k `WHERE uuid=$1` queries) reduced ~3× by the cache (~16k). §5D — under a 30%-same-key burst, `refreshed-cache` holds p99 at ~27–38 ms (vs Direct's ~186–209 ms) while coalescing trims DB queries below the raw `lru-cache` arm. ⚠️ The Direct baseline is no-latency local Postgres, so the throughput edge is modest here — coalescing's win is most visible in production where DB round trips are 5–20 ms.
 
 ```javascript
 const Cache = require("refreshed-cache");
@@ -558,7 +570,7 @@ app.get("/product/:id", async (req, res) => {
 
 **When to use:** a single request needs multiple related records (feed items, dashboard widgets, product recommendations, order line items). Combine with Pattern 3 — `fetchByKey` handles single-key coalescing and `fetchByKeys` handles multi-key batching; they work together.
 
-**Benchmark backing:** §5D shows 2.3–2.7× throughput improvement and ~63% fewer queries — but the baseline is a hand-crippled no-coalescing cache subclass, not a realistic ORM loop. The benchmark §5A is a closer proxy: it measures a per-key no-cache baseline (one `WHERE uuid=$1` per request) and the cache cuts that ~3×. ⚠️ Neither benchmark isolates batch loading specifically with realistic network latency. A proper N+1 benchmark is an open item (see §8).
+**Benchmark backing:** §5D shows `refreshed-cache` matching raw `lru-cache` throughput while coalescing trims DB queries below it (~1.04M vs ~1.14M / 600s) — but it no longer isolates an N+1 multiplier (the prior "2.3–2.7× vs a no-coalescing subclass" arm was removed). The benchmark §5A is a closer proxy: it measures a per-key no-cache baseline (one `WHERE uuid=$1` per request) and the cache cuts that ~3×. ⚠️ Neither benchmark isolates batch loading specifically with realistic network latency. A proper N+1 benchmark is an open item (see §8).
 
 ```javascript
 const cache = new Cache(

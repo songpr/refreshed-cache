@@ -45,8 +45,11 @@ declare class DataCache<K, V> {
     hitVsFetchLatencyRatio: number;
     /** @deprecated Back-compat alias for hitVsFetchLatencyRatio. */
     hitSpeedup: number;
+    avgBatchSize: number;
     batchPerKeyMs: number;
     batchEfficiency: number;
+    /** Requests short-circuited by the miss-cache (bogus keys absorbed without a fetch). */
+    missCacheHits: number;
   };
 
   init(): Promise<void>;
@@ -69,6 +72,8 @@ declare class DataCache<K, V> {
     activeSize: number;
     hitSizeRatio: number;
     utilization: number;
+    /** Stable diagnosis code for the current workload. */
+    code: 'disabled' | 'healthy' | 'thrash' | 'refresh-waste' | 'miss-protected' | 'batch-efficient' | 'low-value' | 'over-provisioned';
     recommendation: string;
   };
 }

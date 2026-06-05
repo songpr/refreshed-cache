@@ -46,8 +46,8 @@ In short: pick `refreshed-cache` when "keep the hot set warm on a schedule" is t
 | # | Selling point | Strength | Evidence |
 | :--- | :--- | :--- | :--- |
 | 1 | **Cache-penetration / miss protection** (`maxMiss`/`maxAgeMiss`) — shrug off floods of bogus keys | **Strongest, cleanest cache-vs-no-cache win** | [§E](benchmark/README.md#e-cache-penetration-attack-protection-miss-cache-5-rounds-60s-with-ttl-cycling): ~110k → ~3k DB queries (~97%), p99 ~200 ms → ~0.2 ms, ~7.5 MB bounded heap |
-| 2 | **Scheduled, *batched* refresh of a hot set** (`refreshAge`/`refreshAt` + `passRecentKeysOnRefresh`) — no request pays refresh latency | The #1 *unique* differentiator over `lru-cache` | [§B](benchmark/README.md#b-long-running-strategy-simulation--memory-bounding-for-huge-datasets-5-rounds-max-100000): ~95% hit rate over 10M rows from a bounded ~44 MB set, ~601 queries/window |
-| 3 | **N+1 collapse** (`getOrFetchMany`/`fetchByKeys`) | Real-world strong; benchmark baseline still weak | [§D](benchmark/README.md#d-new-features-performance-roi-request-coalescing-bulk-batching--observability) (vs old per-key path, not a real ORM loop — see its caveat) |
+| 2 | **Scheduled, *batched* refresh of a hot set** (`refreshAge`/`refreshAt` + `passRecentKeysOnRefresh`) — no request pays refresh latency | The #1 *unique* differentiator over `lru-cache` | [§B](benchmark/README.md#b-long-running-strategy-simulation--memory-bounding-for-huge-datasets-5-rounds-max-100000): ~95% hit rate over 20M rows from a bounded ~44 MB set, ~601 queries/window |
+| 3 | **N+1 collapse** (`getOrFetchMany`/`fetchByKeys`) | Real-world strong; benchmark baseline still weak | [§D](benchmark/README.md#d-new-features-performance-roi-request-coalescing-bulk-batching--observability) (coalescing trims queries vs raw `lru-cache`; no isolated N+1 multiplier — see its caveat) |
 | 4 | **`gain()` sizing/health advisor** | A **heuristic, now calibrated** on real workloads (see [note below](#status-of-gain-recommendations)) | `test/gain-calibration.test.js` (8/8) |
 
 > **Sharpest one-line pitch:** *`lru-cache` for read-heavy DB workloads — keep a hot set warm with scheduled batched refresh, collapse N+1 reads, and shrug off key-penetration floods.* What it is **not** (yet) is "faster than `lru-cache`": there is no head-to-head `lru-cache` throughput benchmark, so that claim is feature-level only.
@@ -315,7 +315,7 @@ npm test -- --detectOpenHandles --runInBand         # open-handle diagnostics
 RUN_ROADMAP_TESTS=true npm test -- test/tdd_roadmap.test.js   # roadmap tests
 ```
 
-> **Benchmarks:** measured by a process-isolated harness against a 10M-row Postgres table. Headline numbers are cited inline in the [usage patterns](#effective-production-usage-patterns) below; full tables and methodology live in the **[Benchmark README](benchmark/README.md)**.
+> **Benchmarks:** measured by a process-isolated harness against a 20M-row Postgres table. Headline numbers are cited inline in the [usage patterns](#effective-production-usage-patterns) below; full tables and methodology live in the **[Benchmark README](benchmark/README.md)**.
 
 ---
 
@@ -364,7 +364,7 @@ app.get("/product/:id", async (req, res) => {
 ```
 
 ### Pattern B: Resolving N+1 Database Queries (Bulk Batch Loading)
-**Benchmark backing:** [§5D](benchmark/README.md#d-new-features-performance-roi-request-coalescing-bulk-batching--observability) — replacing key-by-key fetches with `getOrFetchMany` + `fetchByKeys` lifts throughput **2.3–2.7x** (~22–25k rps vs ~9–12k) and cuts DB queries by ~63% (~50k vs ~135k).
+**Benchmark backing:** [§5D](benchmark/README.md#d-new-features-performance-roi-request-coalescing-bulk-batching--observability) — with `getOrFetchMany` + `fetchByKeys`, `refreshed-cache` sustains **~25k rps** (matching raw `lru-cache`, no orchestration overhead) while single-flight coalescing trims DB queries below the `lru-cache` baseline (**~1.04M vs ~1.14M** over the 600s run; **~54.3k vs ~59.7k** per 30s window). Against the no-cache Direct baseline it also collapses tail latency (p99 ~34 ms vs ~207 ms). *(Note: the prior "2.3–2.7× vs the old per-key path" figure is retired — that internal baseline was removed from the benchmark.)*
 
 When loading dashboard widgets, lists, or feeds that query multiple related entities, use `fetchByKeys` and `cache.getOrFetchMany(keys)`. This groups all missing keys and fetches them in a single batch statement (e.g. `WHERE id IN (...)`) rather than iterating key-by-key.
 
@@ -392,9 +392,9 @@ app.get("/users/bulk", async (req, res) => {
 ```
 
 ### Pattern C: Active-Only Memory-Efficient Caching (For Huge Datasets)
-**Benchmark backing:** [§5B](benchmark/README.md#b-long-running-strategy-simulation--memory-bounding-for-huge-datasets-5-rounds-max-100000) — against a 10M-row table, Active-Only Refresh holds a ~95% hit rate while firing only **~601 DB queries per 30s window** vs ~51k for lazy fetch (a **>90x** reduction), with peak heap bounded at ~44–48 MB.
+**Benchmark backing:** [§5B](benchmark/README.md#b-long-running-strategy-simulation--memory-bounding-for-huge-datasets-5-rounds-max-100000) — against a 20M-row table, Active-Only Refresh holds a ~95% hit rate while firing only **~601 DB queries per 30s window** vs ~51k for lazy fetch (a **>90x** reduction), with peak heap bounded at ~44–48 MB.
 
-When your database contains millions of records (e.g., 10M or 100M rows), caching the entire dataset in-process is impossible. Use the **Active-Only Refresh** strategy. It regularly refreshes only the keys that have been read since the last refresh interval, keeping the hot set warm while bounding memory usage.
+When your database contains millions of records (e.g., 20M or 100M rows), caching the entire dataset in-process is impossible. Use the **Active-Only Refresh** strategy. It regularly refreshes only the keys that have been read since the last refresh interval, keeping the hot set warm while bounding memory usage.
 
 ```javascript
 const cache = new Cache(
@@ -416,7 +416,7 @@ const cache = new Cache(
 ```
 
 ### Pattern D: Safeguarding against Cache Penetration (Hard Miss Protection)
-**Benchmark backing:** [§5E](benchmark/README.md#e-cache-penetration-attack-protection-miss-cache-5-rounds-60s-with-ttl-cycling) — under a 50%-bogus penetration attack against a 1,000-key pool, miss-cache bounds DB load to ~pool-size per `maxAgeMiss` window (**~3,060 queries/60s**) vs ~57k with `maxMiss: 0` and ~112k uncached — a **~95% reduction** — while p99 stays **~0.2 ms**.
+**Benchmark backing:** [§5E](benchmark/README.md#e-cache-penetration-attack-protection-miss-cache-5-rounds-60s-with-ttl-cycling) — under a 50%-bogus penetration attack against a 1,000-key pool, miss-cache bounds DB load to ~pool-size per `maxAgeMiss` window (**~3,060 queries/60s**) vs ~56k with `maxMiss: 0` and ~112k uncached — a **~97% reduction** — while p99 stays **~0.2 ms**.
 
 When clients query non-existent keys (e.g. `product-non-existent-999`), a cache miss normally forces a database query. A flood of non-existent queries can take down your database (Cache Penetration Attack). 
 
@@ -438,7 +438,7 @@ const cache = new Cache(
 ```
 
 ### Pattern E: Scheduled Refresh Ahead of a Known Update Time (Time-Aligned Freshness)
-**Benchmark backing:** [§5B](benchmark/README.md#b-long-running-strategy-simulation--memory-bounding-for-huge-datasets-5-rounds-max-100000) — refreshing only the *demonstrated* working set (`passRecentKeysOnRefresh`) holds a **~95% hit rate over a 10M-row table** while firing only **~601 DB queries per window** from a **bounded ~44 MB** hot set, with flat memory across rounds.
+**Benchmark backing:** [§5B](benchmark/README.md#b-long-running-strategy-simulation--memory-bounding-for-huge-datasets-5-rounds-max-100000) — refreshing only the *demonstrated* working set (`passRecentKeysOnRefresh`) holds a **~95% hit rate over a 20M-row table** while firing only **~601 DB queries per window** from a **bounded ~44 MB** hot set, with flat memory across rounds.
 
 This is `refreshed-cache`'s core moat over lazy/pull caches: when you **know** the backend changes on a schedule (nightly batch job, pricing table that updates at market open, config/feature-flag rebuild), point `refreshAt` at a wall-clock time **just after** that update. The working set is re-fetched proactively, so **no user request ever pays the refresh latency** — they hit a warm, fresh cache.
 
@@ -472,21 +472,21 @@ const cache = new Cache(
 The same suite that backs the patterns above also pins down where they backfire. Reach for these as "don't do this" guardrails:
 
 **1. Refreshing more than demand has revealed (full/guessed preload instead of active-only).**
-**Benchmark backing:** [§5B](benchmark/README.md#b-long-running-strategy-simulation--memory-bounding-for-huge-datasets-5-rounds-max-100000) — against a 10M-row table, *Scheduled Full Refresh* and *Lazy per-key* fire **~51,000–53,000 DB queries** per run (and Full Refresh peaks at **~67 MB** heap), versus **~601 queries** and **~44 MB** for Active-Only Refresh (`passRecentKeysOnRefresh`) — a **>90×** query blowup and ~35% more peak heap for keys nobody asked for. If you try to "pre-warm" a guessed key set, those reloads are the wasted work you were worried about. Let demand populate the cache and replay `recentKeys` instead.
+**Benchmark backing:** [§5B](benchmark/README.md#b-long-running-strategy-simulation--memory-bounding-for-huge-datasets-5-rounds-max-100000) — against a 20M-row table, *Scheduled Full Refresh* and *Lazy per-key* fire **~51,000–53,000 DB queries** per run (and Full Refresh peaks at **~67 MB** heap), versus **~601 queries** and **~44 MB** for Active-Only Refresh (`passRecentKeysOnRefresh`) — a **>90×** query blowup and ~35% more peak heap for keys nobody asked for. If you try to "pre-warm" a guessed key set, those reloads are the wasted work you were worried about. Let demand populate the cache and replay `recentKeys` instead.
 
 **2. Sizing `max` below the working set.**
 **Benchmark backing:** [§5C](benchmark/README.md#c-sustained-high-concurrency-load-test-5-rounds-max-100000) — a 120k-key sliding window against a 100k `max` thrashes: constant eviction → constant per-key miss refetches, only **~25% fewer DB queries** than no cache, and p99 latency (**~210 ms**) tracking the direct baseline because the connection pool saturates. A cache smaller than the hot set is close to no cache at all — size `max` to the working set (and keep `maxAge` long enough that the set survives between refreshes, per Pattern E).
 
 **3. Reading `gain()` "speedup"/"time saved" as throughput.**
-**Benchmark backing:** [§5 methodology](benchmark/README.md#8-measurement-methodology) — `Hit/Fetch latency ratio` is a per-operation latency *ratio* and `Est. time saved` is a counterfactual estimate, both inflated by miss-fetch latency. They are diagnostics, not application speedups (real end-to-end gain is ~1.5–3×, see §A). Don't quote them as performance numbers.
+**Benchmark backing:** [§5 methodology](benchmark/README.md#8-measurement-methodology) — `Hit/Fetch latency ratio` is a per-operation latency *ratio* and `Est. time saved` is a counterfactual estimate, both inflated by miss-fetch latency. They are diagnostics, not application speedups (the real end-to-end win is a stable ~3× DB-query reduction, with a noisier throughput speedup, see §A). Don't quote them as performance numbers.
 
 ### Status of `gain()` recommendations
 
-`gain().recommendation` exposes a stable `code`: `thrash` / `refresh-waste` / `low-value` / `over-provisioned` / `healthy` / `disabled`. It remains a **heuristic advisor** (workload-dependent — treat the `code` as a hint to investigate, not a hard guarantee), but the thresholds are now **calibrated against real workloads**:
+`gain().recommendation` exposes a stable `code`: `thrash` / `refresh-waste` / `miss-protected` / `batch-efficient` / `low-value` / `over-provisioned` / `healthy` / `disabled`. It remains a **heuristic advisor** (workload-dependent — treat the `code` as a hint to investigate, not a hard guarantee), but the thresholds are now **calibrated against real workloads**:
 
 - **Branch logic:** `test/recommend.test.js` exercises every branch of the decision tree and its boundaries deterministically.
 - **Behavioral calibration:** `test/gain-calibration.test.js` drives a real `DataCache` into each state through the **public API only** (`init`/`get`/`getOrFetch`/`asyncRefresh`) — working-set-exceeds-`max` → `thrash`, full-cache-low-reuse → `refresh-waste`, full-cache-high-reuse → `healthy` (incl. the fall-through and the post-refresh last-window path), plus `over-provisioned` / `low-value` sizing edges — and asserts each emitted `code`. This is the "tested result" that confirms the numeric thresholds (`evictChurn > 0.1`, `windowReuseRatio < 0.1`, `hitRate < 0.5`, `utilization > 0.8`) fire correctly on real behavior, not just on poked counters. All 8 scenarios pass.
-- **Still a heuristic:** the cutoffs are validated as *reasonable and correctly-firing on representative workloads*, not proven optimal for every workload. A remaining nice-to-have is asserting the same `code`s on the Postgres benchmark fixtures (§C/§B) — see [DEVELOPMENT_PLAN.md Tier 2.8](DEVELOPMENT_PLAN.md).
+- **Validated on the Postgres benchmark — and two false-negatives were found and fixed.** The 2026-06-05 full-suite run (benchmark §A–§E) first witnessed `gain()` scoring §B Active-Only Refresh and §E miss-cache `low-value` despite both being genuinely valuable — because a low *hit rate* there reflects batched misses (§B) or bogus-key absorption (§E), not low value. Two signals were added (TDD, `test/gain-calibration.test.js`): **`missProtectionRatio`** (from a new `missCacheHits` counter) → emits **`miss-protected`** when the miss-cache absorbs a bogus-key flood; and **`avgBatchSize`** → emits **`batch-efficient`** when low-hit-rate misses are collapsed into batched `getOrFetchMany` fetches. The benchmark now witnesses §A → `healthy`, §C (deliberate thrash) → `low-value`, **§B → `batch-efficient`, §E → `miss-protected`** — all correct. **Still a heuristic:** treat the `code` as a hint, not a guarantee, and lean on the DB-query/p99 columns for magnitude. See [DEVELOPMENT_PLAN.md Tier 2.8](DEVELOPMENT_PLAN.md).
 
 ---
 

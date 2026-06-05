@@ -62,8 +62,8 @@ If a use case doesn't match that sentence, the honest recommendation is raw `lru
 | # | Selling point | Evidence strength | Backed by |
 | :--- | :--- | :--- | :--- |
 | 1 | **Miss / cache-penetration protection** (`maxMiss`/`maxAgeMiss`) | Strongest, cleanest cache-vs-no-cache win | §E: ~97% DB-query reduction, p99 ~200 ms → ~0.2 ms |
-| 2 | **Scheduled batched refresh of the hot set** (`refreshAge`/`refreshAt` + `passRecentKeysOnRefresh`) | The #1 *unique* differentiator | §B: 95% hit rate over 10M rows from a bounded ~44 MB set |
-| 3 | **N+1 collapse** (`getOrFetchMany`/`fetchByKeys`) | Real-world strong; benchmark baseline weak | §D (vs old per-key path — see Tier 2.7 Gap 2) |
+| 2 | **Scheduled batched refresh of the hot set** (`refreshAge`/`refreshAt` + `passRecentKeysOnRefresh`) | The #1 *unique* differentiator | §B: 95% hit rate over 20M rows from a bounded ~44 MB set |
+| 3 | **N+1 collapse** (`getOrFetchMany`/`fetchByKeys`) | Real-world strong; benchmark baseline weak | §D (coalescing vs raw `lru-cache`; no isolated N+1 multiplier — see Tier 2.7 Gap 2) |
 | 4 | **`gain()` advisor** | Heuristic, **calibrated** on real workloads (Tier 2.8) | `test/recommend.test.js` + `test/gain-calibration.test.js` |
 
 **Sharpest tagline:** *"`lru-cache` for read-heavy DB workloads — keep a hot set warm with scheduled batched refresh, collapse N+1 reads, and shrug off key-penetration floods."*
@@ -185,7 +185,7 @@ The current benchmark suite (`benchmark/README.md §8`) has three documented evi
 
 **New script: `benchmark/run-refresh-vs-direct.js`**
 
-Three strategies, all serving the same 10k-key working set from a 10M-row DB:
+Three strategies, all serving the same 10k-key working set from a 20M-row DB:
 
 | Strategy | What it does | Expected DB queries for 50,000 reads |
 | :--- | :--- | :--- |
@@ -201,7 +201,7 @@ Add a simulated `sleep(10)` to all three DB paths (models a realistic 10 ms netw
 
 #### Gap 2 — Batch loading: N+1 collapse with realistic network latency
 
-**What the current suite says:** §D shows 2.3–2.7× improvement for `getOrFetchMany` vs the old per-key path — but the "old" baseline is a hand-disabled subclass (`DataCacheNoCoalescing`), not a realistic no-cache ORM loop. The benchmark uses local Postgres (sub-ms), so the DB-latency difference between 1 query and N queries is invisible.
+**What the current suite says:** §D no longer isolates an N+1 multiplier — the old hand-disabled `DataCacheNoCoalescing` baseline was removed, and the prior "2.3–2.7× vs the old per-key path" figure is retired. §D now shows `getOrFetchMany`-driven `refreshed-cache` matching raw `lru-cache` throughput while coalescing trims DB queries below it. The benchmark still uses local Postgres (sub-ms), so the DB-latency difference between 1 query and N queries is invisible — a realistic N+1 benchmark (N per-key queries × network latency vs 1 batch query) remains the gap.
 
 **What's missing:** a benchmark with a realistic no-cache N+1 baseline and simulated network latency.
 
@@ -273,10 +273,10 @@ Add `sleep(10)` to all DB paths. The expected outcome — "ORM loop 200k queries
 ### Tier 2.8 — `gain()` anti-pattern detection & advice (✅ CALIBRATED — ship gate for 1.9.0 met)
 
 > **Status (verified against code & tests, 2026-06-05):**
-> - ✅ **Decision tree implemented** — `_recommend({ hitRate, utilization, evictChurn, windowReuseRatio, totalRequests })` (`index.js:18`) with stable codes `thrash` / `refresh-waste` / `low-value` / `over-provisioned` / `healthy` / `disabled`; wired into `gain()` (`index.js:558`).
+> - ✅ **Decision tree implemented** — `_recommend({ hitRate, utilization, evictChurn, windowReuseRatio, totalRequests, missProtectionRatio, avgBatchSize })` (`index.js:18`) with stable codes `thrash` / `refresh-waste` / `miss-protected` / `batch-efficient` / `low-value` / `over-provisioned` / `healthy` / `disabled`; wired into `gain()` (`index.js:558`).
 > - ✅ **Branch unit tests** — `test/recommend.test.js` asserts all six codes deterministically.
 > - ✅ **Behavioral calibration (the "tested result" gating 1.9.0)** — `test/gain-calibration.test.js` drives a real `DataCache` into each state through the **public API only** and asserts the emitted `code`: working-set > `max` → `thrash`; full cache + low reuse → `refresh-waste`; full cache + high reuse → `healthy` (covering both the fall-through and the post-`asyncRefresh` last-window path); plus `over-provisioned` / `low-value` sizing edges. **8/8 pass with no threshold changes needed** — i.e. the cutoffs (`evictChurn > 0.1`, `windowReuseRatio < 0.1`, `hitRate < 0.5`, `utilization > 0.8`) fire correctly on real behavior, closing the two gaps that previously made `gain()` "logic-tested but unvalidated" (the untested `healthy` fall-through, and `refresh-waste` being verified by counter-poking).
-> - ⏳ **Optional remaining nice-to-have (NOT a ship blocker):** assert the same `code`s on the Postgres benchmark fixtures (§C → `thrash`, §B Strategy C → `healthy`, §B Strategy A → `refresh-waste`) so the long-running suite also *witnesses* them. Today only `run-new-features-benchmark.js:402` asserts a code (`healthy`); `run-long-benchmark.js:286` merely logs it. The deterministic unit-level calibration above already covers the same states, so this is corroboration, not the gate.
+> - ✅ **Postgres-fixture corroboration — RUN 2026-06-05; surfaced two false-negatives, now FIXED (TDD).** The full suite logs the `code` per section. First run: §A (per-key, hot set fits) → `healthy` ✅; §C (120k window > 100k `max`, deliberate thrash) → `low-value` ✅; but **§B Strategy C (Active-Only Refresh) and §E (miss-cache) both scored `low-value` despite being genuinely valuable** — false-negatives, because `gain()` only keyed on hit-rate/utilization and a low hit rate there reflects **batched misses** (§B) or **bogus-key absorption** (§E), not low value. **Fix (TDD):** two signals were added to `_recommend` — `missProtectionRatio` (from a new `_missCacheHits` counter incremented on the miss-cache short-circuit in `getOrFetch`/`getOrFetchMany`) → new code **`miss-protected`**; and `avgBatchSize` (exposed on `metrics`) → new code **`batch-efficient`** when low-hit-rate misses are collapsed into batched fetches. RED tests in `gain-calibration.test.js` drove a real `DataCache` into each state via the public API and asserted the new codes; GREEN with all prior 8/8 calibration + 6 recommend tests still passing (16/16 total). Re-verified on the real benchmarks: **§E miss-protection-enabled → `miss-protected`, §B Strategy C → `batch-efficient`** (§A/§C/§D unchanged). The fix is **classification-only** — no change to cache hit/miss/fetch behavior, so the §A–§E throughput/DB-query tables are unaffected.
 >
 > **Conclusion:** `gain()` is calibrated and safe to ship in 1.9.0, documented as a **heuristic advisor** (README → "Status of `gain()` recommendations") — validated as correctly-firing on representative workloads, not claimed optimal for every workload.
 
@@ -333,15 +333,15 @@ Add `sleep(10)` to all DB paths. The expected outcome — "ORM loop 200k queries
 
 **What shipped (in `run-new-features-benchmark.js`):**
 
-1. **Seeded PRNG (`mulberry32`).** Each logical request derives its keys from a PRNG seeded by `(--seed + round, requestSeq)`, so key selection depends only on the seed and the request index — never on async interleaving between the 4 workers.
-2. **Logical-tick window sweep.** The sliding hot-key window advances by request/batch progress instead of `Date.now()`, so GC/scheduling jitter no longer shifts which keys are hot.
+1. **Stateless seeded draws (`hashFloat`).** Each logical request makes its random decisions via `hashFloat(seedBase, requestSeq, drawIndex)` — a splitmix-style hash with **zero per-request allocation** — seeded by `(--seed + round, requestSeq)`, so key selection depends only on the seed and the request index, never on async interleaving between the 4 workers (and adjacent requests are independently mixed, not seeded from adjacent integers). *(Originally a per-request `mulberry32` closure; replaced after a code review flagged hot-path allocation and consecutive-seed correlation — see `gotchas/benchmark-harness-determinism.md`.)*
+2. **Cyclic logical window sweep.** The sliding hot-key window advances by logical request progress (`reqSeq`), completing one full sweep every ~30s-equivalent of traffic (`SWEEP_PERIOD_SEC`) instead of by `Date.now()` — matching the original wall-clock cadence while staying jitter-independent and never falling behind into only the early universe on a slow strategy.
 3. **`--requests=N` work box.** Stops after exactly N logical requests instead of a fixed duration, fixing the request *count* alongside the key sequence. (`--duration` time-box remains the default for steady-state/variance runs.)
 4. **GC settle points** before the baseline heap sample and before load starts.
 5. **Median-of-N aggregate table.** Multi-round runs print a `median (min–max)` summary per strategy beneath the per-round table — robust to single-round GC outliers while still showing the spread.
 
-**Measured outcome.** Two back-to-back `--requests=40000 --seed=777` runs: **Direct** is bit-identical (40,000 DB queries); **lru-cache** and **refreshed-cache** reproduce to **~0.1%** (25,354 vs 25,371; 22,074 vs 22,072) — down from a ~9% raw swing.
+**Measured outcome (2026-06-05, post-fix).** Two back-to-back `--requests=40000 --seed=777` runs are now **bit-identical on every arm**: Direct `40,000`, lru-cache `25,291`, refreshed-cache `21,904` DB queries in both runs — down from a ~9% raw swing (and from the ~0.1% the first `mulberry32` cut reached).
 
-**Honest determinism boundary.** The cache arms are *not* bit-identical because two timing dependencies survive: the hot-window boundary for a batch depends on `reqSeq` at batch start, and refreshed-cache's single-flight **coalescing** collapses *concurrently* in-flight misses (which misses overlap is a scheduling property). `NUM_WORKERS=1` would make them exact but removes the concurrency the coalescing feature exists to exercise — the wrong trade — so ~0.1% is the accepted floor. Use a large `--requests` (e.g. 2M) for steady state; small counts are warmup-weighted. Full methodology in `benchmark/README.md §8`.
+**Honest determinism boundary.** At this scale the arms are bit-identical, but exactness is the *observed floor*, not a guarantee at every scale: refreshed-cache's single-flight **coalescing** collapses *concurrently* in-flight misses, and which misses overlap is a scheduling property, so much larger `--requests` or higher worker counts can still introduce sub-0.1% drift. `NUM_WORKERS=1` would force exactness everywhere but removes the concurrency the coalescing feature exists to exercise — the wrong trade. Use a large `--requests` (e.g. 2M) for steady state; small counts are warmup-weighted. Full methodology in `benchmark/README.md §8`.
 
 **Scope note.** This is benchmark-harness work only — **no change to `index.js`/library behavior**, so no version bump. It strengthens the evidence behind the §D claims; it does not create a new one.
 

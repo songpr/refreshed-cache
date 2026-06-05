@@ -12,17 +12,23 @@ const TARGET_REQUESTS = parseInt(getArg('requests', '0'), 10);
 const WORK_BOX = TARGET_REQUESTS > 0;
 const NUM_WORKERS = 4;
 
-// Deterministic PRNG (mulberry32). Seeding the workload per logical request makes
-// key selection reproducible across rounds and across code changes, turning this
-// from a variance demo into a regression-grade harness. See --seed below.
-function mulberry32(seed) {
-    let a = seed >>> 0;
-    return function () {
-        a |= 0; a = (a + 0x6D2B79F5) | 0;
-        let t = Math.imul(a ^ (a >>> 15), 1 | a);
-        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
+// Deterministic, stateless draw source. Seeding the workload per logical request
+// makes key selection reproducible across rounds and across code changes, turning
+// this from a variance demo into a regression-grade harness. See --seed below.
+//
+// hashFloat(seed, seq, n) hash-mixes the request seed, the request seq, and a draw
+// index into a float in [0, 1). It replaces a per-request mulberry32 *closure* for
+// two reasons: (1) zero allocation on the measured hot path — at ~25k rps the old
+// "new PRNG per request" raised minor-GC frequency inside the measurement window and
+// self-distorted the metric; (2) adjacent requests (seq, seq+1) are no longer derived
+// from adjacent PRNG seeds — every (seq, n) pair is independently avalanche-mixed, so
+// the synthetic branch/key draws stay well-decorrelated. (splitmix-style finalizer.)
+function hashFloat(seed, seq, n) {
+    let h = (seed ^ Math.imul(seq + 1, 0x9E3779B1) ^ Math.imul(n + 1, 0x85EBCA6B)) >>> 0;
+    h = Math.imul(h ^ (h >>> 16), 0x21F0AAAD) >>> 0;
+    h = Math.imul(h ^ (h >>> 15), 0x735A2D97) >>> 0;
+    h = (h ^ (h >>> 15)) >>> 0;
+    return h / 4294967296;
 }
 
 function median(nums) {
@@ -189,14 +195,19 @@ async function runBenchmarkStrategy(name, setupCacheFn, seedBase) {
     const batchSize = 50; // Requests per batch loop
     const targetQps = 1000;
     const intervalMs = (batchSize / targetQps) * 1000;
-    // Total batch loops expected across all workers; drives the window sweep by
-    // LOGICAL progress instead of wall-clock so the sweep is reproducible regardless
-    // of GC/scheduling jitter.
-    const totalBatches = Math.max(1, NUM_WORKERS * Math.round((TOTAL_DURATION_SEC * 1000) / intervalMs));
+    // The hot-key window completes one full sweep every SWEEP_PERIOD_SEC of simulated
+    // traffic, advanced by LOGICAL request progress (reqSeq) rather than wall-clock.
+    // This (a) restores the original ~30s sweep cadence — ~20 sweeps over a 600s run,
+    // so hit/eviction behaviour stays comparable to the published §D numbers instead of
+    // crawling through a single slow sweep — and (b) stays reproducible regardless of
+    // GC/scheduling jitter AND independent of how many batches a given strategy manages
+    // to execute (a slow strategy no longer sweeps only the early universe). The cycle
+    // length is workers × qps × period requests.
+    const SWEEP_PERIOD_SEC = 30;
+    const requestsPerSweep = Math.max(1, NUM_WORKERS * targetQps * SWEEP_PERIOD_SEC);
 
-    // Monotonic counters: every request gets a unique seq → its own seeded PRNG, so
-    // key selection depends only on (seedBase, seq), never on async interleaving.
-    let batchTick = 0;
+    // Monotonic request counter: every request gets a unique seq, so key selection
+    // depends only on (seedBase, seq), never on async interleaving between workers.
     let reqSeq = 0;
 
     // Background worker simulating concurrent operations
@@ -213,33 +224,35 @@ async function runBenchmarkStrategy(name, setupCacheFn, seedBase) {
                 thisBatch = Math.min(batchSize, remaining);
             }
 
-            const tick = batchTick++;
-            // Window sweeps by logical progress: request budget in work-box mode,
-            // batch budget in time-boxed mode. Either way it's reproducible.
-            const progress = WORK_BOX
-                ? Math.min(0.999999, reqSeq / TARGET_REQUESTS)
-                : tick / totalBatches;
+            // Cyclic logical sweep: window position depends only on reqSeq at batch
+            // start, so the same ~30s-equivalent cadence applies to both time-boxed and
+            // work-box runs and never wanders off the early universe when a strategy runs
+            // slow. It wraps every requestsPerSweep requests.
+            const progress = (reqSeq / requestsPerSweep) % 1;
             const windowStart = Math.min(windowDenom - 1, Math.floor(progress * windowDenom));
             const hotPool = uuidsUniverse.slice(windowStart, windowStart + windowSize);
 
             // Constructing a mixture of individual key lookups and batch requests
             const promises = Array.from({ length: thisBatch }, async () => {
                 const seq = reqSeq++;
-                const rng = mulberry32((seedBase * 0x9E3779B1 + seq) >>> 0);
-                const rand = rng();
+                // Per-request draw index: each hashFloat(seedBase, seq, draw++) is an
+                // independent, allocation-free draw (see hashFloat). draw advances once
+                // per random decision so the sequence is fully determined by (seedBase, seq).
+                let draw = 0;
+                const rand = hashFloat(seedBase, seq, draw++);
                 const qStart = process.hrtime.bigint();
                 let results = {};
 
                 if (rand < 0.30) {
                     // 30% chance: Batch fetch of 20 keys (representing dashboard loading)
                     const keys = Array.from({ length: 20 }, () => {
-                        const r = rng();
+                        const r = hashFloat(seedBase, seq, draw++);
                         if (r < 0.85 && hotPool.length > 0) {
-                            return hotPool[Math.floor(rng() * hotPool.length)];
+                            return hotPool[Math.floor(hashFloat(seedBase, seq, draw++) * hotPool.length)];
                         } else if (r < 0.95) {
-                            return uuidsUniverse[Math.floor(rng() * uuidsUniverse.length)];
+                            return uuidsUniverse[Math.floor(hashFloat(seedBase, seq, draw++) * uuidsUniverse.length)];
                         } else {
-                            return 'non-existent-' + Math.floor(rng() * 1000000);
+                            return 'non-existent-' + Math.floor(hashFloat(seedBase, seq, draw++) * 1000000);
                         }
                     });
 
@@ -255,18 +268,18 @@ async function runBenchmarkStrategy(name, setupCacheFn, seedBase) {
                 } else {
                     // 70% chance: Single key lookup (with 30% thundering herd chance on same key)
                     let key;
-                    const thunderingRand = rng();
+                    const thunderingRand = hashFloat(seedBase, seq, draw++);
                     if (thunderingRand < 0.30 && hotPool.length > 0) {
                         // Thundering herd: Multiple concurrent tasks query the exact same hot key
                         key = hotPool[0];
                     } else {
-                        const r = rng();
+                        const r = hashFloat(seedBase, seq, draw++);
                         if (r < 0.85 && hotPool.length > 0) {
-                            key = hotPool[Math.floor(rng() * hotPool.length)];
+                            key = hotPool[Math.floor(hashFloat(seedBase, seq, draw++) * hotPool.length)];
                         } else if (r < 0.95) {
-                            key = uuidsUniverse[Math.floor(rng() * uuidsUniverse.length)];
+                            key = uuidsUniverse[Math.floor(hashFloat(seedBase, seq, draw++) * uuidsUniverse.length)];
                         } else {
-                            key = 'non-existent-' + Math.floor(rng() * 1000000);
+                            key = 'non-existent-' + Math.floor(hashFloat(seedBase, seq, draw++) * 1000000);
                         }
                     }
 

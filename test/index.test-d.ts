@@ -83,8 +83,10 @@ expectType<{
   timeSavedMs: number;
   hitVsFetchLatencyRatio: number;
   hitSpeedup: number;
+  avgBatchSize: number;
   batchPerKeyMs: number;
   batchEfficiency: number;
+  missCacheHits: number;
 }>(cache.metrics);
 
 if (cache.refreshAt) {
@@ -120,6 +122,7 @@ expectType<{
   activeSize: number;
   hitSizeRatio: number;
   utilization: number;
+  code: 'disabled' | 'healthy' | 'thrash' | 'refresh-waste' | 'miss-protected' | 'batch-efficient' | 'low-value' | 'over-provisioned';
   recommendation: string;
 }>(cache.gain());
 

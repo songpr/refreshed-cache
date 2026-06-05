@@ -116,6 +116,57 @@ describe('gain() calibration — real workloads emit the correct code', () => {
         expect(g.code).toBe('low-value');
     });
 
+    it('miss-protected: a bogus-key flood absorbed by the miss-cache is not low-value', async () => {
+        // §E mirror: 50%-ish of traffic hammers a small pool of non-existent keys. The
+        // miss-cache absorbs the repeats (fetchByKey returns undefined → cached as a miss),
+        // which drags the cache hit rate below 0.5 even though the backend is being shielded.
+        // The advisor must recognise the protection, NOT call it low-value.
+        const cache = newCache(() => [], {
+            max: 10000,
+            maxMiss: 1000,
+            maxAgeMiss: 600,
+            // valid* keys exist; bogus* keys don't (penetration attack).
+            fetchByKey: async (k) => (k.startsWith('valid') ? `v${k}` : undefined),
+        });
+        await cache.init();
+
+        // Warm a small valid set (a handful of real hits).
+        for (let i = 0; i < 50; i++) await cache.getOrFetch(`valid${i}`);
+        for (let i = 0; i < 50; i++) await cache.getOrFetch(`valid${i}`); // re-read → hits
+
+        // Flood a 200-key bogus pool 10× → first pass populates the miss-cache, the rest
+        // are absorbed (peek short-circuit) and counted as miss-cache hits.
+        for (let r = 0; r < 10; r++) {
+            for (let i = 0; i < 200; i++) await cache.getOrFetch(`bogus${i}`);
+        }
+
+        const g = cache.gain();
+        expect(g.utilization).toBeLessThan(0.8);
+        expect(g.code).toBe('miss-protected');
+    });
+
+    it('batch-efficient: low hit rate but misses collapsed into batched fetches is not low-value', async () => {
+        // §B mirror: a sliding window over a key space larger than what is reused, served
+        // via getOrFetchMany. The cache hit rate is low (most keys are new each batch) and
+        // utilization is modest, but every miss batch becomes ONE fetchByKeys call — so the
+        // backend load is tiny. The advisor must not call this low-value.
+        const cache = newCache(() => [], {
+            max: 100000,
+            fetchByKeys: async (keys) => keys.map((k) => [k, `v${k}`]),
+        });
+        await cache.init();
+
+        // 200 batches of 100 keys, stride 90 → ~10% overlap (hits), ~90% new (batched misses).
+        for (let i = 0; i < 200; i++) {
+            const batch = Array.from({ length: 100 }, (_, j) => `k${i * 90 + j}`);
+            await cache.getOrFetchMany(batch);
+        }
+
+        const g = cache.gain();
+        expect(g.utilization).toBeLessThan(0.8);
+        expect(g.code).toBe('batch-efficient');
+    });
+
     it('healthy survives a refresh-window roll (uses last-window counters)', async () => {
         // Build a healthy state, then roll the window via asyncRefresh so gain()
         // reads _lastWindow* instead of the live window — both paths must agree.
