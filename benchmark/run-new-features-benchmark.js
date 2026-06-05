@@ -4,6 +4,12 @@ const { sleep, measureMemory, percentiles, resetCacheMetrics, logCacheValidation
 const { getArg, isChild, emitResult, orchestrate } = require('./lib/isolated-runner');
 
 const TOTAL_DURATION_SEC = parseInt(getArg('duration', '600'), 10);
+// Work-box mode: when --requests=<n> is set, the run stops after exactly N requests
+// instead of after a fixed duration. Combined with --seed this makes the executed
+// workload bit-identical across runs (same keys AND same request count), so DB-query
+// counts are directly comparable — true regression diffing. 0 = time-boxed (default).
+const TARGET_REQUESTS = parseInt(getArg('requests', '0'), 10);
+const WORK_BOX = TARGET_REQUESTS > 0;
 const NUM_WORKERS = 4;
 
 // Deterministic PRNG (mulberry32). Seeding the workload per logical request makes
@@ -129,12 +135,16 @@ const STRATEGIES = [
     },
 ];
 
-async function runBenchmarkStrategy(name, setupCacheFn) {
+async function runBenchmarkStrategy(name, setupCacheFn, seedBase) {
     console.log(`\n======================================================`);
     console.log(`RUNNING STRATEGY: ${name}`);
-    console.log(`Duration: ${TOTAL_DURATION_SEC}s | Cache Ceiling: 100,000 keys`);
+    const box = WORK_BOX ? `${TARGET_REQUESTS} requests` : `${TOTAL_DURATION_SEC}s`;
+    console.log(`Work box: ${box} | Cache Ceiling: 100,000 keys | Seed: ${seedBase}`);
     console.log(`======================================================`);
 
+    // Settle the heap before sampling the baseline so memory deltas start from an
+    // equal, post-collection state each round (children run with --expose-gc).
+    if (global.gc) global.gc();
     const baseMem = await measureMemory();
     console.log(`Base Memory: Heap ${baseMem.heapUsed} MB | RSS ${baseMem.rss} MB`);
 
@@ -173,37 +183,63 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
     let intervalLatencies = [];
     let intervalRequests = 0;
 
+    // Sliding window of hot keys representing shifting traffic (scaled to 120,000 to fill 100,000 cache capacity).
+    const windowSize = 120000;
+    const windowDenom = Math.max(1, uuidsUniverse.length - windowSize);
+    const batchSize = 50; // Requests per batch loop
+    const targetQps = 1000;
+    const intervalMs = (batchSize / targetQps) * 1000;
+    // Total batch loops expected across all workers; drives the window sweep by
+    // LOGICAL progress instead of wall-clock so the sweep is reproducible regardless
+    // of GC/scheduling jitter.
+    const totalBatches = Math.max(1, NUM_WORKERS * Math.round((TOTAL_DURATION_SEC * 1000) / intervalMs));
+
+    // Monotonic counters: every request gets a unique seq → its own seeded PRNG, so
+    // key selection depends only on (seedBase, seq), never on async interleaving.
+    let batchTick = 0;
+    let reqSeq = 0;
+
     // Background worker simulating concurrent operations
     const runWorker = async () => {
-        const batchSize = 50; // Requests per batch loop
-        const targetQps = 1000;
-        const intervalMs = (batchSize / targetQps) * 1000;
-
         while (isRunning) {
             const batchStart = Date.now();
-            const elapsedTimeSec = (Date.now() - startTime) / 1000;
 
-            // Sliding window of hot keys representing shifting traffic (scaled to 120,000 to fill 100,000 cache capacity)
-            const windowSize = 120000;
-            const windowStart = Math.floor(elapsedTimeSec * 1000) % (uuidsUniverse.length - windowSize);
+            // In work-box mode, stop the moment the global request budget is exhausted,
+            // and size the final batch to land on EXACTLY TARGET_REQUESTS (seqs 0..N-1).
+            let thisBatch = batchSize;
+            if (WORK_BOX) {
+                const remaining = TARGET_REQUESTS - reqSeq;
+                if (remaining <= 0) { isRunning = false; break; }
+                thisBatch = Math.min(batchSize, remaining);
+            }
+
+            const tick = batchTick++;
+            // Window sweeps by logical progress: request budget in work-box mode,
+            // batch budget in time-boxed mode. Either way it's reproducible.
+            const progress = WORK_BOX
+                ? Math.min(0.999999, reqSeq / TARGET_REQUESTS)
+                : tick / totalBatches;
+            const windowStart = Math.min(windowDenom - 1, Math.floor(progress * windowDenom));
             const hotPool = uuidsUniverse.slice(windowStart, windowStart + windowSize);
 
             // Constructing a mixture of individual key lookups and batch requests
-            const promises = Array.from({ length: batchSize }, async () => {
-                const rand = Math.random();
+            const promises = Array.from({ length: thisBatch }, async () => {
+                const seq = reqSeq++;
+                const rng = mulberry32((seedBase * 0x9E3779B1 + seq) >>> 0);
+                const rand = rng();
                 const qStart = process.hrtime.bigint();
                 let results = {};
 
                 if (rand < 0.30) {
                     // 30% chance: Batch fetch of 20 keys (representing dashboard loading)
                     const keys = Array.from({ length: 20 }, () => {
-                        const r = Math.random();
+                        const r = rng();
                         if (r < 0.85 && hotPool.length > 0) {
-                            return hotPool[Math.floor(Math.random() * hotPool.length)];
+                            return hotPool[Math.floor(rng() * hotPool.length)];
                         } else if (r < 0.95) {
-                            return uuidsUniverse[Math.floor(Math.random() * uuidsUniverse.length)];
+                            return uuidsUniverse[Math.floor(rng() * uuidsUniverse.length)];
                         } else {
-                            return 'non-existent-' + Math.floor(Math.random() * 1000000);
+                            return 'non-existent-' + Math.floor(rng() * 1000000);
                         }
                     });
 
@@ -219,18 +255,18 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
                 } else {
                     // 70% chance: Single key lookup (with 30% thundering herd chance on same key)
                     let key;
-                    const thunderingRand = Math.random();
+                    const thunderingRand = rng();
                     if (thunderingRand < 0.30 && hotPool.length > 0) {
                         // Thundering herd: Multiple concurrent tasks query the exact same hot key
                         key = hotPool[0];
                     } else {
-                        const r = Math.random();
+                        const r = rng();
                         if (r < 0.85 && hotPool.length > 0) {
-                            key = hotPool[Math.floor(Math.random() * hotPool.length)];
+                            key = hotPool[Math.floor(rng() * hotPool.length)];
                         } else if (r < 0.95) {
-                            key = uuidsUniverse[Math.floor(Math.random() * uuidsUniverse.length)];
+                            key = uuidsUniverse[Math.floor(rng() * uuidsUniverse.length)];
                         } else {
-                            key = 'non-existent-' + Math.floor(Math.random() * 1000000);
+                            key = 'non-existent-' + Math.floor(rng() * 1000000);
                         }
                     }
 
@@ -261,13 +297,28 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
         }
     };
 
-    // Spawn concurrent load workers
-    const workerPromises = Array.from({ length: 4 }, () => runWorker());
+    // Settle the heap once more so the first measurement interval isn't skewed by
+    // setup-phase garbage from a GC pause landing inside the window.
+    if (global.gc) global.gc();
 
-    // Monitor loop
+    // Spawn concurrent load workers
+    const workerPromises = Array.from({ length: NUM_WORKERS }, () => runWorker());
+
+    // Monitor loop. Time-boxed mode runs a fixed number of intervals; work-box mode
+    // samples on a cadence until the workers exhaust the request budget. Throughput
+    // is computed from REAL elapsed time per interval so a short final interval (or a
+    // GC-stretched one) isn't misreported.
+    const sampleSec = WORK_BOX ? Math.min(5, intervalSec) : intervalSec;
     const totalIntervals = Math.max(1, Math.round(TOTAL_DURATION_SEC / intervalSec));
-    for (let t = 1; t <= totalIntervals; t++) {
-        await sleep(intervalSec * 1000);
+    let t = 0;
+    let lastSample = Date.now();
+    while (isRunning) {
+        await sleep(sampleSec * 1000);
+        t++;
+
+        const now = Date.now();
+        const elapsedSec = (now - lastSample) / 1000;
+        lastSample = now;
 
         const snapshotLatencies = intervalLatencies;
         intervalLatencies = [];
@@ -277,7 +328,7 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
         intervalRequests = 0;
         totalRequests += requests;
 
-        const throughput = Math.round(requests / intervalSec);
+        const throughput = Math.round(requests / elapsedSec);
         const mem = await measureMemory();
         const intervalDbQueries = dbQueryCount;
         dbQueryCount = 0;
@@ -287,10 +338,11 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
             const m = cache.metrics;
             metricsStr = ` | Hits: ${m.hits} | Misses: ${m.misses} | Coalesced: ${m.coalescedFetches} | Invalidations: ${m.invalidations}`;
         }
-        console.log(`[${t * intervalSec}s] Cache Size: ${cache ? cache.size : 'N/A'} | Throughput: ${throughput} rps | p50: ${pct.p50}ms | p95: ${pct.p95}ms | p99: ${pct.p99}ms | DB Queries: ${intervalDbQueries}${metricsStr} | Heap: ${mem.heapUsed} MB | RSS: ${mem.rss} MB`);
+        const tag = WORK_BOX ? `${reqSeq}/${TARGET_REQUESTS} req` : `${t * intervalSec}s`;
+        console.log(`[${tag}] Cache Size: ${cache ? cache.size : 'N/A'} | Throughput: ${throughput} rps | p50: ${pct.p50}ms | p95: ${pct.p95}ms | p99: ${pct.p99}ms | DB Queries: ${intervalDbQueries}${metricsStr} | Heap: ${mem.heapUsed} MB | RSS: ${mem.rss} MB`);
 
         statsHistory.push({
-            elapsed: t * intervalSec,
+            elapsed: Math.round((now - startTime) / 1000),
             throughput,
             avgLatency: pct.avg,
             p50: pct.p50,
@@ -300,6 +352,10 @@ async function runBenchmarkStrategy(name, setupCacheFn) {
             heap: mem.heapUsed,
             rss: mem.rss
         });
+
+        // Time-boxed mode ends after its fixed interval budget; work-box mode keeps
+        // sampling until a worker flips isRunning=false on hitting TARGET_REQUESTS.
+        if (!WORK_BOX && t >= totalIntervals) isRunning = false;
     }
 
     isRunning = false;
@@ -389,8 +445,12 @@ async function main() {
         const strat = STRATEGIES.find(s => s.key === key);
         if (!strat) throw new Error(`Unknown strategy key: ${key}`);
         const prefix = rounds > 1 ? `[Round ${round}] ` : '';
+        // Per-round seed: every strategy within a round shares the same key sequence
+        // (apples-to-apples), and each round is reproducible across re-invocations.
+        // Override the base with --seed=<n> to pin or shift the whole sweep.
+        const seedBase = (parseInt(getArg('seed', '1000'), 10) + round) >>> 0;
         await warmup();
-        const result = await runBenchmarkStrategy(`${prefix}${strat.label}`, strat.setup);
+        const result = await runBenchmarkStrategy(`${prefix}${strat.label}`, strat.setup, seedBase);
         emitResult(result);
         await sql.end();
         return;
@@ -420,6 +480,38 @@ async function main() {
         'Cleaned Heap (MB)': r.afterCleanupHeapMB,
         'Correctness': r.correctness
     })));
+
+    if (rounds > 1) {
+        // Aggregate across rounds per strategy. Median is robust to the single-round
+        // GC/scheduling outliers that make raw per-round numbers look unstable; min–max
+        // shows the spread so a regression is distinguishable from normal variance.
+        const stripRound = (name) => name.replace(/^\[Round \d+\]\s*/, '');
+        const byStrategy = new Map();
+        for (const r of results) {
+            const label = stripRound(r.name);
+            if (!byStrategy.has(label)) byStrategy.set(label, []);
+            byStrategy.get(label).push(r);
+        }
+
+        console.log(`\n======================================================`);
+        console.log(`AGGREGATE OVER ${rounds} ROUNDS (median | min–max)`);
+        console.log(`======================================================`);
+        const fmt = (arr, d = 0) => {
+            const med = median(arr);
+            const lo = Math.min(...arr);
+            const hi = Math.max(...arr);
+            return `${med.toFixed(d)} (${lo.toFixed(d)}–${hi.toFixed(d)})`;
+        };
+        console.table(Array.from(byStrategy.entries()).map(([label, rs]) => ({
+            'Strategy': label,
+            'Throughput (rps)': fmt(rs.map(r => r.avgThroughput)),
+            'p50 (ms)': fmt(rs.map(r => parseFloat(r.p50)), 2),
+            'p99 (ms)': fmt(rs.map(r => parseFloat(r.p99)), 2),
+            'DB Queries': fmt(rs.map(r => r.totalDBQueries)),
+            'Heap Growth (MB)': fmt(rs.map(r => r.peakHeapMB - r.baseHeapMB), 2),
+            'Correctness': rs.every(r => r.correctness.includes('PASSED')) ? '✅ PASSED' : '❌ FAILED'
+        })));
+    }
 
     await sql.end();
 }

@@ -24,7 +24,7 @@ This document reflects the **actual implemented state** of `refreshed-cache` (`i
 
 ### Versioning plan
 
-- **`1.9.0` (next release):** publish the unreleased observability + backoff + `gain()` work. It is purely additive over the published 1.8.0, so it's a **minor**. Remove the never-shipped `hitSpeedup`/`speedupFactor` aliases pre-publish and ship `hitVsFetchLatencyRatio` with a clean surface. The Tier 2.8 advisory `gain()` can land in this same release, since no part of `gain()` has shipped yet.
+- **`1.9.0` (next release):** publish the unreleased observability + backoff + `gain()` work. It is purely additive over the published 1.8.0, so it's a **minor**. Remove the never-shipped `hitSpeedup`/`speedupFactor` aliases pre-publish and ship `hitVsFetchLatencyRatio` with a clean surface. The Tier 2.8 advisory `gain()` lands in this release. **Ship gate (met 2026-06-05):** `gain()`'s recommendations must be *calibrated against real workloads before publish*, not shipped as untested heuristics — satisfied by `test/gain-calibration.test.js` (8/8 states emit the correct `code` via the public API). See Tier 2.8.
 - **`2.0.0` (reserve for real breakage — do not manufacture):** the alias removal is a non-event (never published), so 2.0 needs a genuine breaking change to justify it. Candidates to hold for a deliberate major: **`getOrFetchMany` returning a `Map`** instead of `Record<any,V>` (the object form coerces numeric/object keys to strings — a real correctness limitation), raising the **minimum Node version / ESM-first** packaging, or changing a surprising **default** (`resetOnRefresh`, `maxMiss`). Let a real breaking need trigger it, not a positioning milestone — "the cache now advises" is a 1.9.0 *release-notes story*, not a major bump.
 
 ---
@@ -54,6 +54,25 @@ This is the question every evaluator asks, and the README must answer it in one 
 > **`refreshed-cache` is for read-heavy workloads over a bounded, slowly-changing dataset (reference/config/catalog data) where you want the hot set kept fresh *proactively on a schedule* — so no request ever pays refresh latency — rather than lazily revalidated on access like raw `lru-cache`.**
 
 If a use case doesn't match that sentence, the honest recommendation is raw `lru-cache` (`fetchMethod` + `allowStale`). Owning a narrow, correct niche beats pretending to be a general cache.
+
+### Strategy forward — the selling point, ranked by evidence strength
+
+`refreshed-cache` is an **orchestration layer over `lru-cache` v11**, not a faster cache engine. The go-to-market message must lead with the capabilities `lru-cache` lacks entirely, ordered by how hard the backing evidence is:
+
+| # | Selling point | Evidence strength | Backed by |
+| :--- | :--- | :--- | :--- |
+| 1 | **Miss / cache-penetration protection** (`maxMiss`/`maxAgeMiss`) | Strongest, cleanest cache-vs-no-cache win | §E: ~97% DB-query reduction, p99 ~200 ms → ~0.2 ms |
+| 2 | **Scheduled batched refresh of the hot set** (`refreshAge`/`refreshAt` + `passRecentKeysOnRefresh`) | The #1 *unique* differentiator | §B: 95% hit rate over 10M rows from a bounded ~44 MB set |
+| 3 | **N+1 collapse** (`getOrFetchMany`/`fetchByKeys`) | Real-world strong; benchmark baseline weak | §D (vs old per-key path — see Tier 2.7 Gap 2) |
+| 4 | **`gain()` advisor** | Heuristic, **calibrated** on real workloads (Tier 2.8) | `test/recommend.test.js` + `test/gain-calibration.test.js` |
+
+**Sharpest tagline:** *"`lru-cache` for read-heavy DB workloads — keep a hot set warm with scheduled batched refresh, collapse N+1 reads, and shrug off key-penetration floods."*
+
+**Two constraints that gate the message today:**
+1. **The differentiating features are unpublished.** npm `1.8.0` ships the refresh/miss-cache/coalescing surface but **not** `gain()`/metrics/hooks (see §0). The single highest-leverage strategic action is **publishing `1.9.0`** — until then, points 1, 3 (partially), and 4 above are not real to users.
+2. **"Faster than `lru-cache`" is not yet a claim we can make** — there is no raw-`lru-cache` throughput baseline (Tier 2.7 Gap 3). Keep the comparison **feature-level**, not throughput-level.
+
+**The honest disqualifier is itself a selling point (of trust):** if a user needs *only* per-key memoization + TTL + lazy stale-revalidate + same-key coalescing, plain `lru-cache` already does that — say so. The library earns its place only on (a) scheduled batched refresh, (b) batch loading, or (c) miss protection.
 
 ---
 
@@ -251,7 +270,15 @@ Add `sleep(10)` to all DB paths. The expected outcome — "ORM loop 200k queries
 
 ---
 
-### Tier 2.8 — `gain()` anti-pattern detection & advice (next increment)
+### Tier 2.8 — `gain()` anti-pattern detection & advice (✅ CALIBRATED — ship gate for 1.9.0 met)
+
+> **Status (verified against code & tests, 2026-06-05):**
+> - ✅ **Decision tree implemented** — `_recommend({ hitRate, utilization, evictChurn, windowReuseRatio, totalRequests })` (`index.js:18`) with stable codes `thrash` / `refresh-waste` / `low-value` / `over-provisioned` / `healthy` / `disabled`; wired into `gain()` (`index.js:558`).
+> - ✅ **Branch unit tests** — `test/recommend.test.js` asserts all six codes deterministically.
+> - ✅ **Behavioral calibration (the "tested result" gating 1.9.0)** — `test/gain-calibration.test.js` drives a real `DataCache` into each state through the **public API only** and asserts the emitted `code`: working-set > `max` → `thrash`; full cache + low reuse → `refresh-waste`; full cache + high reuse → `healthy` (covering both the fall-through and the post-`asyncRefresh` last-window path); plus `over-provisioned` / `low-value` sizing edges. **8/8 pass with no threshold changes needed** — i.e. the cutoffs (`evictChurn > 0.1`, `windowReuseRatio < 0.1`, `hitRate < 0.5`, `utilization > 0.8`) fire correctly on real behavior, closing the two gaps that previously made `gain()` "logic-tested but unvalidated" (the untested `healthy` fall-through, and `refresh-waste` being verified by counter-poking).
+> - ⏳ **Optional remaining nice-to-have (NOT a ship blocker):** assert the same `code`s on the Postgres benchmark fixtures (§C → `thrash`, §B Strategy C → `healthy`, §B Strategy A → `refresh-waste`) so the long-running suite also *witnesses* them. Today only `run-new-features-benchmark.js:402` asserts a code (`healthy`); `run-long-benchmark.js:286` merely logs it. The deterministic unit-level calibration above already covers the same states, so this is corroboration, not the gate.
+>
+> **Conclusion:** `gain()` is calibrated and safe to ship in 1.9.0, documented as a **heuristic advisor** (README → "Status of `gain()` recommendations") — validated as correctly-firing on representative workloads, not claimed optimal for every workload.
 
 **Goal:** make `gain().recommendation` a *trustworthy* diagnosis that catches the three documented anti-patterns (README → "Anti-Patterns", benchmark `README.md §0`), instead of the current sizing-only heuristic that **misdiagnoses two of them**.
 
@@ -297,6 +324,26 @@ Add `sleep(10)` to all DB paths. The expected outcome — "ORM loop 200k queries
 **Why no dedicated throughput benchmark (unlike Tier 2.7).** Gaps 1–3 each *prove a performance differentiator* — a new measurable characteristic. `gain()` advice introduces **no new runtime behavior to measure**; it's a diagnostic *over* existing behavior. A standalone throughput study would measure the wrong thing. The correct artifact is a correctness assertion layered onto the fixtures that already exist. Reach for a new benchmark only if a threshold itself needs empirical calibration data the current fixtures don't already produce.
 
 **Cost / ROI:** ~40–60 LOC (`hitRate` in `metrics`, `dispose` eviction counter, extracted `_recommend`, decision tree) + a table-driven unit test file + ~10 LOC of assertions in the existing benchmark harness. ROI **High** — converts `gain()` from a sizing hint that lies on two of three anti-patterns into a self-diagnosing advisor, which is the natural payoff of having documented those anti-patterns at all.
+
+---
+
+### Tier 2.9 — Reproducible benchmark harness (✅ DONE)
+
+**Problem this closed.** §D's `run-new-features-benchmark.js` was time-boxed and unseeded, so round-to-round throughput swung ~9% and DB-query counts drifted, making it impossible to tell a real regression from normal noise. Process isolation (Tier 2 harness) fixed *heap* accumulation but not *workload* variance.
+
+**What shipped (in `run-new-features-benchmark.js`):**
+
+1. **Seeded PRNG (`mulberry32`).** Each logical request derives its keys from a PRNG seeded by `(--seed + round, requestSeq)`, so key selection depends only on the seed and the request index — never on async interleaving between the 4 workers.
+2. **Logical-tick window sweep.** The sliding hot-key window advances by request/batch progress instead of `Date.now()`, so GC/scheduling jitter no longer shifts which keys are hot.
+3. **`--requests=N` work box.** Stops after exactly N logical requests instead of a fixed duration, fixing the request *count* alongside the key sequence. (`--duration` time-box remains the default for steady-state/variance runs.)
+4. **GC settle points** before the baseline heap sample and before load starts.
+5. **Median-of-N aggregate table.** Multi-round runs print a `median (min–max)` summary per strategy beneath the per-round table — robust to single-round GC outliers while still showing the spread.
+
+**Measured outcome.** Two back-to-back `--requests=40000 --seed=777` runs: **Direct** is bit-identical (40,000 DB queries); **lru-cache** and **refreshed-cache** reproduce to **~0.1%** (25,354 vs 25,371; 22,074 vs 22,072) — down from a ~9% raw swing.
+
+**Honest determinism boundary.** The cache arms are *not* bit-identical because two timing dependencies survive: the hot-window boundary for a batch depends on `reqSeq` at batch start, and refreshed-cache's single-flight **coalescing** collapses *concurrently* in-flight misses (which misses overlap is a scheduling property). `NUM_WORKERS=1` would make them exact but removes the concurrency the coalescing feature exists to exercise — the wrong trade — so ~0.1% is the accepted floor. Use a large `--requests` (e.g. 2M) for steady state; small counts are warmup-weighted. Full methodology in `benchmark/README.md §8`.
+
+**Scope note.** This is benchmark-harness work only — **no change to `index.js`/library behavior**, so no version bump. It strengthens the evidence behind the §D claims; it does not create a new one.
 
 ---
 

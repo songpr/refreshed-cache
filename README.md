@@ -39,6 +39,19 @@ APIs have been kept to be minimal, unless there are useful use cases.
 
 In short: pick `refreshed-cache` when "keep the hot set warm on a schedule" is the requirement; pick raw `lru-cache` when "populate lazily on demand" is enough.
 
+### The selling point, ranked by how hard the evidence is
+
+`refreshed-cache` is an **orchestration layer over `lru-cache` v11** — it is not a faster cache *engine* (it delegates `max`/`ttl`/eviction straight to `lru-cache`). Its value is the three capabilities `lru-cache` has no concept of, plus a diagnostics layer. Ranked by strength of the backing evidence:
+
+| # | Selling point | Strength | Evidence |
+| :--- | :--- | :--- | :--- |
+| 1 | **Cache-penetration / miss protection** (`maxMiss`/`maxAgeMiss`) — shrug off floods of bogus keys | **Strongest, cleanest cache-vs-no-cache win** | [§E](benchmark/README.md#e-cache-penetration-attack-protection-miss-cache-5-rounds-60s-with-ttl-cycling): ~110k → ~3k DB queries (~97%), p99 ~200 ms → ~0.2 ms, ~7.5 MB bounded heap |
+| 2 | **Scheduled, *batched* refresh of a hot set** (`refreshAge`/`refreshAt` + `passRecentKeysOnRefresh`) — no request pays refresh latency | The #1 *unique* differentiator over `lru-cache` | [§B](benchmark/README.md#b-long-running-strategy-simulation--memory-bounding-for-huge-datasets-5-rounds-max-100000): ~95% hit rate over 10M rows from a bounded ~44 MB set, ~601 queries/window |
+| 3 | **N+1 collapse** (`getOrFetchMany`/`fetchByKeys`) | Real-world strong; benchmark baseline still weak | [§D](benchmark/README.md#d-new-features-performance-roi-request-coalescing-bulk-batching--observability) (vs old per-key path, not a real ORM loop — see its caveat) |
+| 4 | **`gain()` sizing/health advisor** | A **heuristic, now calibrated** on real workloads (see [note below](#status-of-gain-recommendations)) | `test/gain-calibration.test.js` (8/8) |
+
+> **Sharpest one-line pitch:** *`lru-cache` for read-heavy DB workloads — keep a hot set warm with scheduled batched refresh, collapse N+1 reads, and shrug off key-penetration floods.* What it is **not** (yet) is "faster than `lru-cache`": there is no head-to-head `lru-cache` throughput benchmark, so that claim is feature-level only.
+
 ## Installation:
 
 ```javascript
@@ -466,6 +479,14 @@ The same suite that backs the patterns above also pins down where they backfire.
 
 **3. Reading `gain()` "speedup"/"time saved" as throughput.**
 **Benchmark backing:** [§5 methodology](benchmark/README.md#8-measurement-methodology) — `Hit/Fetch latency ratio` is a per-operation latency *ratio* and `Est. time saved` is a counterfactual estimate, both inflated by miss-fetch latency. They are diagnostics, not application speedups (real end-to-end gain is ~1.5–3×, see §A). Don't quote them as performance numbers.
+
+### Status of `gain()` recommendations
+
+`gain().recommendation` exposes a stable `code`: `thrash` / `refresh-waste` / `low-value` / `over-provisioned` / `healthy` / `disabled`. It remains a **heuristic advisor** (workload-dependent — treat the `code` as a hint to investigate, not a hard guarantee), but the thresholds are now **calibrated against real workloads**:
+
+- **Branch logic:** `test/recommend.test.js` exercises every branch of the decision tree and its boundaries deterministically.
+- **Behavioral calibration:** `test/gain-calibration.test.js` drives a real `DataCache` into each state through the **public API only** (`init`/`get`/`getOrFetch`/`asyncRefresh`) — working-set-exceeds-`max` → `thrash`, full-cache-low-reuse → `refresh-waste`, full-cache-high-reuse → `healthy` (incl. the fall-through and the post-refresh last-window path), plus `over-provisioned` / `low-value` sizing edges — and asserts each emitted `code`. This is the "tested result" that confirms the numeric thresholds (`evictChurn > 0.1`, `windowReuseRatio < 0.1`, `hitRate < 0.5`, `utilization > 0.8`) fire correctly on real behavior, not just on poked counters. All 8 scenarios pass.
+- **Still a heuristic:** the cutoffs are validated as *reasonable and correctly-firing on representative workloads*, not proven optimal for every workload. A remaining nice-to-have is asserting the same `code`s on the Postgres benchmark fixtures (§C/§B) — see [DEVELOPMENT_PLAN.md Tier 2.8](DEVELOPMENT_PLAN.md).
 
 ---
 

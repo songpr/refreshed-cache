@@ -135,8 +135,15 @@ node benchmark/run-long-benchmark.js --rounds=5 --duration=30
 # 3. Sustained Load Test (5 rounds, 30s duration)
 node benchmark/run-load-test.js --rounds=5 --duration=30
 
-# 4. New Features Benchmark (5 rounds, 30s duration)
+# 4. New Features Benchmark (5 rounds, 30s duration) — time-boxed, for steady-state/variance
 node benchmark/run-new-features-benchmark.js --rounds=5 --duration=30
+
+# 4b. New Features Benchmark — REGRESSION-DIFFING mode (deterministic workload)
+#     --requests=N runs a fixed work box (exactly N logical requests) instead of a
+#     fixed duration, and --seed pins the PRNG. Together they make the executed
+#     workload reproducible across runs, so DB-query counts are directly comparable
+#     when checking whether a code change regressed. Use a large N to reach steady state.
+node benchmark/run-new-features-benchmark.js --rounds=3 --requests=2000000 --seed=777
 
 # 5. Miss Cache Benchmark (5 rounds, 60s duration with TTL cycling)
 node benchmark/run-miss-cache-benchmark.js --rounds=5
@@ -420,6 +427,9 @@ All results in §5 are produced by the **process-isolated harness** (`benchmark/
 - **Injected fetch latency (§D)**: the cache `fetchByKey`/`fetchByKeys` paths in §D carry an `await sleep(10)` to model a remote-DB round trip on a miss. The **Direct (No Cache) baseline has no such sleep** — it hits local Postgres at sub-ms. This makes Direct look *better* than a production remote DB would (i.e. the comparison is conservative toward the cache for misses), but it also means the §D New-vs-Direct numbers understate the cache's real-world edge. Old-vs-New both pay the 10 ms, so that comparison is apples-to-apples.
 - **`cache.gain()` figures are estimates, not measurements**: `Est. time saved = hits × (avg miss-fetch latency − avg hit latency)` is a counterfactual that assumes every hit would otherwise have been a full miss-fetch *at the injected ~10 ms latency*. `Hit/Fetch latency ratio` is `avg miss-fetch / avg hit` — a per-operation latency ratio, **not** an application throughput speedup. Hit latency is sampled (`latencySampleRate`, default 0.01) and measured with `performance.now()` around a single `Map.get`, so it is timer-noise-bound at the sub-microsecond scale; do not read its precision literally. Use these as directional diagnostics; use the table throughput/DB-query columns for hard claims.
 - **Variance**: process isolation removes cross-round heap accumulation but not throughput noise. With n=5 and the spreads noted in §5, prefer medians over any single round; the per-section `cache.gain()` callouts happen to all be Round 5 and are illustrative, not representative.
+- **Deterministic mode (`run-new-features-benchmark.js` only)**: this script supports a reproducible workload for regression diffing. (1) **Seeded PRNG** — every logical request derives its keys from a `mulberry32` PRNG seeded by `(--seed + round, requestSeq)`, so *which* keys are touched depends only on the seed and the request index, never on async interleaving between the 4 workers. (2) **Logical-tick window sweep** — the hot-key window slides by request/batch progress instead of wall-clock, so GC/scheduling jitter no longer shifts it. (3) **`--requests=N` work box** — stops after exactly N logical requests instead of after a duration, fixing the request *count* as well as the key sequence. (4) **GC settle points** before the baseline sample and before load starts. (5) **Median-of-N aggregate table** — multi-round runs print a `median (min–max)` summary per strategy beneath the per-round table, which is robust to single-round GC outliers while still surfacing the spread.
+
+  **Measured reproducibility** (two back-to-back `--requests=40000 --seed=777` runs): **Direct** is bit-identical (40,000 DB queries both runs — one query per request, no caching). **lru-cache** and **refreshed-cache** are reproducible to **~0.1%** (e.g. 25,354 vs 25,371; 22,074 vs 22,072), not bit-identical: two timing dependencies survive — the hot-window boundary for a batch depends on `reqSeq` at batch start, and refreshed-cache's single-flight **coalescing** collapses *concurrently* in-flight misses, and which misses overlap is a scheduling property. Both are well under the ~9% raw round-to-round swing this mode replaces. Setting `NUM_WORKERS=1` would make the cache arms exact too, but it removes the concurrency the coalescing feature exists to exercise — the wrong trade for this benchmark, so ~0.1% is treated as the floor. Use a large `--requests` (e.g. 2M) for steady state; small counts are warmup-weighted and read below the steady ~25k rps.
 
 ### Known gap / open item: no raw `lru-cache` baseline
 
